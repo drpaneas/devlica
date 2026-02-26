@@ -55,7 +55,7 @@ func TestInterleave(t *testing.T) {
 func TestParseSynthesis(t *testing.T) {
 	t.Run("raw json with all fields", func(t *testing.T) {
 		input := `{"coding_philosophy":"simplicity","code_style_rules":"use gofmt","review_priorities":"correctness","review_voice":"direct","communication_patterns":"bullet points","testing_philosophy":"table-driven","distinctive_traits":"concise","developer_interests":"Go, Kubernetes","project_patterns":"CLI tools","collaboration_style":"upstream contributor"}`
-		result, err := parseSynthesis(input)
+		result, err := ParseSynthesis(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -78,7 +78,7 @@ func TestParseSynthesis(t *testing.T) {
 
 	t.Run("json in code fence", func(t *testing.T) {
 		input := "```json\n{\"coding_philosophy\":\"clarity\",\"code_style_rules\":\"\",\"review_priorities\":\"\",\"review_voice\":\"\",\"communication_patterns\":\"\",\"testing_philosophy\":\"\",\"distinctive_traits\":\"\",\"developer_interests\":\"\",\"project_patterns\":\"\",\"collaboration_style\":\"\"}\n```"
-		result, err := parseSynthesis(input)
+		result, err := ParseSynthesis(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -89,7 +89,7 @@ func TestParseSynthesis(t *testing.T) {
 
 	t.Run("code fence without json tag", func(t *testing.T) {
 		input := "```\n{\"coding_philosophy\":\"ok\",\"code_style_rules\":\"\",\"review_priorities\":\"\",\"review_voice\":\"\",\"communication_patterns\":\"\",\"testing_philosophy\":\"\",\"distinctive_traits\":\"\",\"developer_interests\":\"\",\"project_patterns\":\"\",\"collaboration_style\":\"\"}\n```"
-		result, err := parseSynthesis(input)
+		result, err := ParseSynthesis(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -100,7 +100,7 @@ func TestParseSynthesis(t *testing.T) {
 
 	t.Run("missing new fields still parses", func(t *testing.T) {
 		input := `{"coding_philosophy":"simplicity","code_style_rules":"use gofmt","review_priorities":"correctness","review_voice":"direct","communication_patterns":"bullet points","testing_philosophy":"table-driven","distinctive_traits":"concise"}`
-		result, err := parseSynthesis(input)
+		result, err := ParseSynthesis(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -114,7 +114,7 @@ func TestParseSynthesis(t *testing.T) {
 
 	t.Run("array values normalized to strings", func(t *testing.T) {
 		input := `{"coding_philosophy":["a","b"],"code_style_rules":"","review_priorities":"","review_voice":"","communication_patterns":"","testing_philosophy":"","distinctive_traits":"","developer_interests":["Go","Rust"],"project_patterns":"","collaboration_style":""}`
-		result, err := parseSynthesis(input)
+		result, err := ParseSynthesis(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -127,7 +127,7 @@ func TestParseSynthesis(t *testing.T) {
 	})
 
 	t.Run("invalid json", func(t *testing.T) {
-		_, err := parseSynthesis("this is not json")
+		_, err := ParseSynthesis("this is not json")
 		if err == nil {
 			t.Error("expected error for invalid JSON")
 		}

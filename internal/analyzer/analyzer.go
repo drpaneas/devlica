@@ -162,7 +162,7 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 		return nil, fmt.Errorf("persona synthesis: %w", err)
 	}
 
-	synthesis, err := parseSynthesis(raw)
+	synthesis, err := ParseSynthesis(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing synthesis JSON: %w", err)
 	}
@@ -171,9 +171,9 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 	return persona, nil
 }
 
-// parseSynthesis extracts a SynthesisResult from the LLM response. It handles
+// ParseSynthesis extracts a SynthesisResult from the LLM response. It handles
 // both raw JSON and JSON wrapped in markdown code fences.
-func parseSynthesis(raw string) (*SynthesisResult, error) {
+func ParseSynthesis(raw string) (*SynthesisResult, error) {
 	text := strings.TrimSpace(raw)
 
 	if idx := strings.Index(text, "```"); idx >= 0 {
@@ -363,12 +363,6 @@ func buildReleasesText(data *ghcrawl.CrawlResult) string {
 			}
 			fmt.Fprintf(&b, "=== %s %s: %s ===\n%s\n\n", rel.Repo, rel.TagName, rel.Name, rel.Body)
 		}
-	}
-	for _, rel := range data.Releases {
-		if rel.Body == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "=== %s %s: %s ===\n%s\n\n", rel.Repo, rel.TagName, rel.Name, rel.Body)
 	}
 	return b.String()
 }

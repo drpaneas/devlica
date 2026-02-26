@@ -27,10 +27,16 @@ func newOllama(host, model string) *ollamaProvider {
 }
 
 type ollamaRequest struct {
-	Model  string `json:"model"`
-	System string `json:"system,omitempty"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
+	Model   string         `json:"model"`
+	System  string         `json:"system,omitempty"`
+	Prompt  string         `json:"prompt"`
+	Stream  bool           `json:"stream"`
+	Options *ollamaOptions `json:"options,omitempty"`
+}
+
+type ollamaOptions struct {
+	Temperature *float32 `json:"temperature,omitempty"`
+	NumPredict  int      `json:"num_predict,omitempty"`
 }
 
 type ollamaResponse struct {
@@ -39,23 +45,36 @@ type ollamaResponse struct {
 }
 
 func (p *ollamaProvider) Complete(ctx context.Context, system, prompt string, opts *CompleteOptions) (string, error) {
-	body, err := json.Marshal(ollamaRequest{
+	req := ollamaRequest{
 		Model:  p.model,
 		System: system,
 		Prompt: prompt,
 		Stream: false,
-	})
+	}
+	if opts != nil {
+		var o ollamaOptions
+		if opts.Temperature != nil {
+			o.Temperature = opts.Temperature
+		}
+		if opts.MaxTokens > 0 {
+			o.NumPredict = opts.MaxTokens
+		}
+		if o.Temperature != nil || o.NumPredict > 0 {
+			req.Options = &o
+		}
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshaling ollama request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.host+"/api/generate", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.host+"/api/generate", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("creating ollama request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.client.Do(req)
+	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("ollama request: %w", err)
 	}

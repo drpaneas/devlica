@@ -222,7 +222,7 @@ func (b *Benchmarker) refinePersona(ctx context.Context, persona *analyzer.Perso
 		return nil, err
 	}
 
-	synthesis, err := parseSynthesis(raw)
+	synthesis, err := analyzer.ParseSynthesis(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing refined synthesis: %w", err)
 	}
@@ -269,17 +269,6 @@ func parseComparisonResult(raw string) (*comparisonResult, error) {
 			err, textutil.Truncate(raw, 500, "..."))
 	}
 	return &comparisonResult{score: parsed.Score, feedback: parsed.Feedback}, nil
-}
-
-func parseSynthesis(raw string) (*analyzer.SynthesisResult, error) {
-	text := stripCodeFences(raw)
-
-	var result analyzer.SynthesisResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return nil, fmt.Errorf("invalid synthesis JSON: %w\nraw (first 500 bytes): %s",
-			err, textutil.Truncate(raw, 500, "..."))
-	}
-	return &result, nil
 }
 
 func stripCodeFences(s string) string {

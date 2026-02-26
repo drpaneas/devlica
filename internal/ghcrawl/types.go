@@ -13,7 +13,6 @@ type CrawlResult struct {
 	AuthoredIssues []IssueData
 	ExternalPRs    []PullRequestData
 	Events         []EventData
-	Releases       []ReleaseData
 }
 
 // TotalCommits returns the sum of commits across all repos.
@@ -43,7 +42,13 @@ func (r *CrawlResult) TotalReviews() int {
 func (r *CrawlResult) TotalIssues() int    { return len(r.AuthoredIssues) }
 func (r *CrawlResult) TotalStarred() int   { return len(r.StarredRepos) }
 func (r *CrawlResult) TotalGists() int     { return len(r.Gists) }
-func (r *CrawlResult) TotalReleases() int  { return len(r.Releases) }
+func (r *CrawlResult) TotalReleases() int {
+	n := 0
+	for _, repo := range r.Repos {
+		n += len(repo.Releases)
+	}
+	return n
+}
 func (r *CrawlResult) TotalExternalPRs() int { return len(r.ExternalPRs) }
 
 // UserProfile holds GitHub profile information.

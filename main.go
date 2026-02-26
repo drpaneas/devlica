@@ -111,11 +111,11 @@ func run(ctx context.Context, cfg *config.Config) error {
 			return fmt.Errorf("benchmarking persona: %w", err)
 		}
 		persona = refined
-		fmt.Printf("\nBenchmark: score=%.1f/100 iterations=%d\n", benchResult.FinalScore, benchResult.Iterations)
+		fmt.Fprintf(os.Stderr, "\nBenchmark: score=%.1f/100 iterations=%d\n", benchResult.FinalScore, benchResult.Iterations)
 		for _, iter := range benchResult.History {
-			fmt.Printf("  iteration %d: score=%.1f\n", iter.Iteration, iter.Score)
+			fmt.Fprintf(os.Stderr, "  iteration %d: score=%.1f\n", iter.Iteration, iter.Score)
 		}
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	} else {
 		slog.Warn("no reviews with diff context available, skipping benchmark")
 	}

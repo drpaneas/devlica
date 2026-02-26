@@ -68,7 +68,10 @@ func TestCrawlResult_TotalGists(t *testing.T) {
 
 func TestCrawlResult_TotalReleases(t *testing.T) {
 	r := &CrawlResult{
-		Releases: make([]ReleaseData, 4),
+		Repos: []RepoData{
+			{Releases: make([]ReleaseData, 3)},
+			{Releases: make([]ReleaseData, 1)},
+		},
 	}
 	if got := r.TotalReleases(); got != 4 {
 		t.Errorf("TotalReleases() = %d, want 4", got)

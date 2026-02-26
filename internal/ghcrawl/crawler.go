@@ -18,7 +18,7 @@ import (
 const (
 	maxCommitsPerRepo = 50
 	maxPRsPerRepo     = 30
-	maxReviewsPerPR   = 50
+	maxReviewsPerRepo = 50
 	maxCodeSamples    = 5
 	maxFileSizeBytes  = 32 * 1024
 	maxPatchLen       = 4096
@@ -72,6 +72,11 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 	// just the most recently pushed repos.
 	deepCrawl := selectDiverseRepos(repos, c.maxRepos, username)
 
+	deepCrawled := make(map[string]bool, len(deepCrawl))
+	for _, r := range deepCrawl {
+		deepCrawled[r.GetFullName()] = true
+	}
+
 	var mu sync.Mutex
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(crawlConcurrency)
@@ -92,31 +97,32 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 		return nil, err
 	}
 
-	// Include remaining repos as metadata-only (no deep crawl).
-	if len(repos) > c.maxRepos {
-		for _, repo := range repos[c.maxRepos:] {
-			owner := repo.GetOwner().GetLogin()
-			rd := RepoData{
-				Name:          repo.GetName(),
-				FullName:      repo.GetFullName(),
-				Description:   repo.GetDescription(),
-				Language:      repo.GetLanguage(),
-				Stars:         repo.GetStargazersCount(),
-				Forks:         repo.GetForksCount(),
-				Topics:        repo.Topics,
-				IsOwner:       strings.EqualFold(owner, username),
-				IsFork:        repo.GetFork(),
-				Archived:      repo.GetArchived(),
-				DefaultBranch: repo.GetDefaultBranch(),
-				OpenIssues:    repo.GetOpenIssuesCount(),
-				CreatedAt:     repo.GetCreatedAt().Time,
-				UpdatedAt:     repo.GetUpdatedAt().Time,
-			}
-			if repo.GetLicense() != nil {
-				rd.License = repo.GetLicense().GetSPDXID()
-			}
-			result.Repos = append(result.Repos, rd)
+	// Include repos not selected for deep-crawling as metadata-only.
+	for _, repo := range repos {
+		if deepCrawled[repo.GetFullName()] {
+			continue
 		}
+		owner := repo.GetOwner().GetLogin()
+		rd := RepoData{
+			Name:          repo.GetName(),
+			FullName:      repo.GetFullName(),
+			Description:   repo.GetDescription(),
+			Language:      repo.GetLanguage(),
+			Stars:         repo.GetStargazersCount(),
+			Forks:         repo.GetForksCount(),
+			Topics:        repo.Topics,
+			IsOwner:       strings.EqualFold(owner, username),
+			IsFork:        repo.GetFork(),
+			Archived:      repo.GetArchived(),
+			DefaultBranch: repo.GetDefaultBranch(),
+			OpenIssues:    repo.GetOpenIssuesCount(),
+			CreatedAt:     repo.GetCreatedAt().Time,
+			UpdatedAt:     repo.GetUpdatedAt().Time,
+		}
+		if repo.GetLicense() != nil {
+			rd.License = repo.GetLicense().GetSPDXID()
+		}
+		result.Repos = append(result.Repos, rd)
 	}
 
 	// Always search external reviews (not just when owned repos have zero).
@@ -138,11 +144,14 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 		result.Repos = append(result.Repos, extRepos...)
 	}
 
-	// Fetch independent data sources concurrently.
-	g2, gCtx2 := errgroup.WithContext(ctx)
+	// Fetch independent data sources concurrently. Each source handles
+	// its own errors (logging warnings), so a WaitGroup suffices.
+	var wg sync.WaitGroup
 
-	g2.Go(func() error {
-		comments, err := c.fetchIssueComments(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		comments, err := c.fetchIssueComments(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch issue comments", "error", err)
 		} else {
@@ -150,11 +159,12 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.IssueComments = comments
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	g2.Go(func() error {
-		starred, err := c.fetchStarredRepos(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		starred, err := c.fetchStarredRepos(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch starred repos", "error", err)
 		} else {
@@ -162,11 +172,12 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.StarredRepos = starred
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	g2.Go(func() error {
-		gists, err := c.fetchGists(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		gists, err := c.fetchGists(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch gists", "error", err)
 		} else {
@@ -174,11 +185,12 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.Gists = gists
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	g2.Go(func() error {
-		orgs, err := c.fetchOrgs(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		orgs, err := c.fetchOrgs(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch orgs", "error", err)
 		} else {
@@ -186,11 +198,12 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.Orgs = orgs
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	g2.Go(func() error {
-		events, err := c.fetchEvents(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		events, err := c.fetchEvents(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch events", "error", err)
 		} else {
@@ -198,11 +211,12 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.Events = events
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	g2.Go(func() error {
-		issues, err := c.fetchAuthoredIssues(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		issues, err := c.fetchAuthoredIssues(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch authored issues", "error", err)
 		} else {
@@ -210,11 +224,12 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.AuthoredIssues = issues
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	g2.Go(func() error {
-		extPRs, err := c.fetchExternalPRs(gCtx2, username)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		extPRs, err := c.fetchExternalPRs(ctx, username)
 		if err != nil {
 			slog.Warn("could not fetch external PRs", "error", err)
 		} else {
@@ -222,12 +237,9 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 			result.ExternalPRs = extPRs
 			mu.Unlock()
 		}
-		return nil
-	})
+	}()
 
-	if err := g2.Wait(); err != nil {
-		return nil, err
-	}
+	wg.Wait()
 
 	return result, nil
 }
@@ -497,7 +509,7 @@ func (c *Crawler) fetchReviewComments(ctx context.Context, owner, repo, username
 			DiffHunk: truncate(cm.GetDiffHunk(), 2000),
 			Date:     cm.GetCreatedAt().Time,
 		})
-		if len(result) >= maxReviewsPerPR {
+		if len(result) >= maxReviewsPerRepo {
 			break
 		}
 	}
@@ -523,7 +535,7 @@ func (c *Crawler) fetchPRConversationComments(ctx context.Context, owner, repo, 
 		if strings.EqualFold(pr.GetUser().GetLogin(), username) {
 			continue
 		}
-		if len(result) >= maxReviewsPerPR {
+		if len(result) >= maxReviewsPerRepo {
 			break
 		}
 		comments, _, err := c.client.Issues.ListComments(ctx, owner, repo, pr.GetNumber(), &github.IssueListCommentsOptions{
@@ -544,7 +556,7 @@ func (c *Crawler) fetchPRConversationComments(ctx context.Context, owner, repo, 
 				URL:  cm.GetHTMLURL(),
 				Date: cm.GetCreatedAt().Time,
 			})
-			if len(result) >= maxReviewsPerPR {
+			if len(result) >= maxReviewsPerRepo {
 				break
 			}
 		}
@@ -694,12 +706,12 @@ func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, cra
 						DiffHunk: truncate(cm.GetDiffHunk(), 2000),
 						Date:     cm.GetCreatedAt().Time,
 					})
-					if len(rd.ReviewComments) >= maxReviewsPerPR {
+					if len(rd.ReviewComments) >= maxReviewsPerRepo {
 						break
 					}
 				}
 			}
-			if len(rd.ReviewComments) >= maxReviewsPerPR {
+			if len(rd.ReviewComments) >= maxReviewsPerRepo {
 				break
 			}
 
@@ -719,12 +731,12 @@ func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, cra
 						URL:  cm.GetHTMLURL(),
 						Date: cm.GetCreatedAt().Time,
 					})
-					if len(rd.PRComments) >= maxReviewsPerPR {
+					if len(rd.PRComments) >= maxReviewsPerRepo {
 						break
 					}
 				}
 			}
-			if len(rd.PRComments) >= maxReviewsPerPR {
+			if len(rd.PRComments) >= maxReviewsPerRepo {
 				break
 			}
 		}
