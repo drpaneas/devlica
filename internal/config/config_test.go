@@ -42,6 +42,64 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "single char username",
+			cfg: Config{
+				Username:    "a",
+				GitHubToken: "ghp_fake",
+				Provider:    llm.ProviderOllama,
+				MaxRepos:    1,
+			},
+		},
+		{
+			name: "hyphen in middle",
+			cfg: Config{
+				Username:    "a-b",
+				GitHubToken: "ghp_fake",
+				Provider:    llm.ProviderOllama,
+				MaxRepos:    1,
+			},
+		},
+		{
+			name: "leading hyphen",
+			cfg: Config{
+				Username:    "-bad",
+				GitHubToken: "ghp_fake",
+				Provider:    llm.ProviderOllama,
+				MaxRepos:    1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "trailing hyphen",
+			cfg: Config{
+				Username:    "bad-",
+				GitHubToken: "ghp_fake",
+				Provider:    llm.ProviderOllama,
+				MaxRepos:    1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "path traversal",
+			cfg: Config{
+				Username:    "../etc",
+				GitHubToken: "ghp_fake",
+				Provider:    llm.ProviderOllama,
+				MaxRepos:    1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "too long username",
+			cfg: Config{
+				Username:    "abcdefghijklmnopqrstuvwxyz01234567890abcd",
+				GitHubToken: "ghp_fake",
+				Provider:    llm.ProviderOllama,
+				MaxRepos:    1,
+			},
+			wantErr: true,
+		},
+		{
 			name: "missing username",
 			cfg: Config{
 				GitHubToken: "ghp_fake",

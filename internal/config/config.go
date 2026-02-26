@@ -3,9 +3,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 
 	"github.com/drpaneas/devlica/internal/llm"
 )
+
+var validUsername = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
 
 // Config holds all runtime configuration for devlica.
 type Config struct {
@@ -24,6 +27,9 @@ type Config struct {
 func (c *Config) Validate() error {
 	if c.Username == "" {
 		return fmt.Errorf("github username is required")
+	}
+	if !validUsername.MatchString(c.Username) {
+		return fmt.Errorf("invalid github username %q", c.Username)
 	}
 	if c.GitHubToken == "" {
 		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
