@@ -394,6 +394,9 @@ func spreadIndices(total, count int) []int {
 		}
 		return indices
 	}
+	if count == 1 {
+		return []int{0}
+	}
 	indices := make([]int, count)
 	step := float64(total-1) / float64(count-1)
 	for i := range indices {
