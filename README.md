@@ -58,7 +58,7 @@ API keys; Ollama runs locally and needs none.
     # Ollama (must be running on localhost:11434, or set OLLAMA_HOST)
     ./devlica -provider ollama drpaneas
 
-Default models are claude-sonnet-4-5, gpt-4o, and llama3,
+Default models are claude-opus-4-6, gpt-4o, and llama3,
 respectively. Use `-model` to override.
 
 ## How it works

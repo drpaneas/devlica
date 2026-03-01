@@ -168,7 +168,7 @@ func TestDefaultModel(t *testing.T) {
 		want     string
 	}{
 		{llm.ProviderOpenAI, "gpt-4o"},
-		{llm.ProviderAnthropic, "claude-sonnet-4-5"},
+		{llm.ProviderAnthropic, "claude-opus-4-6"},
 		{llm.ProviderOllama, "llama3"},
 		{"unknown", ""},
 	}

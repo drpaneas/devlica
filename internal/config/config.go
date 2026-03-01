@@ -69,7 +69,7 @@ func DefaultModel(provider llm.ProviderName) string {
 	case llm.ProviderOpenAI:
 		return "gpt-4o"
 	case llm.ProviderAnthropic:
-		return "claude-sonnet-4-5"
+		return "claude-opus-4-6"
 	case llm.ProviderOllama:
 		return "llama3"
 	default:

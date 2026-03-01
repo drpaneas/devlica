@@ -176,19 +176,27 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 func ParseSynthesis(raw string) (*SynthesisResult, error) {
 	text := strings.TrimSpace(raw)
 
-	if idx := strings.Index(text, "```"); idx >= 0 {
-		text = text[idx+3:]
-		text = strings.TrimPrefix(text, "json")
-		if end := strings.LastIndex(text, "```"); end >= 0 {
-			text = text[:end]
+	// Only strip code fences when the response has non-JSON preamble.
+	// If it already starts with '{', the ``` may be inside a string value
+	// (e.g. "Use GitHub ```suggestion...```") and stripping would destroy it.
+	if text[0] != '{' {
+		if idx := strings.Index(text, "```"); idx >= 0 {
+			text = text[idx+3:]
+			text = strings.TrimPrefix(text, "json")
+			if end := strings.LastIndex(text, "```"); end >= 0 {
+				text = text[:end]
+			}
+			text = strings.TrimSpace(text)
 		}
-		text = strings.TrimSpace(text)
 	}
 
 	var rawMap map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(text), &rawMap); err != nil {
-		return nil, fmt.Errorf("invalid JSON from LLM: %w\nraw response (first 500 bytes): %s",
-			err, textutil.Truncate(raw, 500, "..."))
+		sanitized := textutil.SanitizeJSON(text)
+		if err2 := json.Unmarshal([]byte(sanitized), &rawMap); err2 != nil {
+			return nil, fmt.Errorf("invalid JSON from LLM: %w\nraw response (first 500 bytes): %s",
+				err, textutil.Truncate(raw, 500, "..."))
+		}
 	}
 
 	for k, v := range rawMap {

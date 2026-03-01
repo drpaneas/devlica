@@ -264,22 +264,31 @@ func parseComparisonResult(raw string) (*comparisonResult, error) {
 		Score    float64 `json:"score"`
 		Feedback string  `json:"feedback"`
 	}
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return nil, fmt.Errorf("invalid comparison JSON: %w\nraw (first 500 bytes): %s",
-			err, textutil.Truncate(raw, 500, "..."))
+	// Use Decoder to parse the first JSON object, ignoring any trailing
+	// commentary the LLM may append after the closing brace.
+	dec := json.NewDecoder(strings.NewReader(text))
+	if err := dec.Decode(&parsed); err != nil {
+		sanitized := textutil.SanitizeJSON(text)
+		dec2 := json.NewDecoder(strings.NewReader(sanitized))
+		if err2 := dec2.Decode(&parsed); err2 != nil {
+			return nil, fmt.Errorf("invalid comparison JSON: %w\nraw (first 500 bytes): %s",
+				err, textutil.Truncate(raw, 500, "..."))
+		}
 	}
 	return &comparisonResult{score: parsed.Score, feedback: parsed.Feedback}, nil
 }
 
 func stripCodeFences(s string) string {
 	text := strings.TrimSpace(s)
-	if idx := strings.Index(text, "```"); idx >= 0 {
-		text = text[idx+3:]
-		text = strings.TrimPrefix(text, "json")
-		if end := strings.LastIndex(text, "```"); end >= 0 {
-			text = text[:end]
+	if len(text) > 0 && text[0] != '{' {
+		if idx := strings.Index(text, "```"); idx >= 0 {
+			text = text[idx+3:]
+			text = strings.TrimPrefix(text, "json")
+			if end := strings.LastIndex(text, "```"); end >= 0 {
+				text = text[:end]
+			}
+			text = strings.TrimSpace(text)
 		}
-		text = strings.TrimSpace(text)
 	}
 	return text
 }
