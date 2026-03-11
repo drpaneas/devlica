@@ -80,8 +80,6 @@ func run(ctx context.Context, cfg *config.Config) error {
 		}
 		slog.Info("anthropic auth mode",
 			"mode", authMode,
-			"vertex_region", cfg.VertexRegion,
-			"vertex_project_set", cfg.VertexProjectID != "",
 		)
 	}
 	if cfg.Exhaustive {

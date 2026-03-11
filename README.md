@@ -63,7 +63,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```bash
 # Enable ADC credentials first (outside devlica)
 gcloud auth application-default login
-gcloud auth application-default set-quota-project cloudability-it-gemini
+gcloud auth application-default set-quota-project <your-quota-project-id>
 
 # Claude Code style Vertex env
 export CLAUDE_CODE_USE_VERTEX=1
