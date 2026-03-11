@@ -3,6 +3,7 @@ package ghcrawl
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -65,7 +66,7 @@ func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error
 							slog.Warn("approaching github rate limit, pausing",
 								"remaining", rem, "wait", wait.Round(time.Second))
 							if err := sleepContext(req.Context(), wait+time.Second); err != nil {
-								resp.Body.Close()
+								closeBody(resp.Body)
 								return nil, err
 							}
 						}
@@ -82,7 +83,7 @@ func (t *rateLimitTransport) RoundTrip(req *http.Request) (*http.Response, error
 		}
 
 		slog.Warn("rate limited, retrying", "retry_after", secs, "attempt", attempt+1)
-		resp.Body.Close()
+		closeBody(resp.Body)
 		if err := sleepContext(req.Context(), time.Duration(secs)*time.Second); err != nil {
 			return nil, err
 		}
@@ -97,5 +98,14 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-time.After(d):
 		return nil
+	}
+}
+
+func closeBody(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	if err := body.Close(); err != nil {
+		slog.Debug("failed closing response body", "error", err)
 	}
 }

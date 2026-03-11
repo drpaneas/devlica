@@ -796,8 +796,8 @@ func (c *Crawler) fetchPRConversationComments(ctx context.Context, owner, repo, 
 			break
 		}
 		opts := &github.IssueListCommentsOptions{
-			Sort:        github.String("created"),
-			Direction:   github.String("desc"),
+			Sort:        github.Ptr("created"),
+			Direction:   github.Ptr("desc"),
 			ListOptions: github.ListOptions{PerPage: perPage},
 		}
 		for {
@@ -1076,8 +1076,8 @@ func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, cra
 			}
 
 			icOpts := &github.IssueListCommentsOptions{
-				Sort:        github.String("created"),
-				Direction:   github.String("desc"),
+				Sort:        github.Ptr("created"),
+				Direction:   github.Ptr("desc"),
 				ListOptions: github.ListOptions{PerPage: 100},
 			}
 			for {
@@ -1155,8 +1155,8 @@ func (c *Crawler) fetchIssueComments(ctx context.Context, username string, since
 			continue
 		}
 		opts := &github.IssueListCommentsOptions{
-			Sort:        github.String("created"),
-			Direction:   github.String("desc"),
+			Sort:        github.Ptr("created"),
+			Direction:   github.Ptr("desc"),
 			ListOptions: github.ListOptions{PerPage: 100},
 		}
 		for {

@@ -29,7 +29,11 @@ func fetchWikiPages(ctx context.Context, owner, repo, token string) []WikiPage {
 		slog.Debug("wiki: could not create temp dir", "error", err)
 		return nil
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			slog.Debug("wiki: could not remove temp dir", "dir", tmpDir, "error", err)
+		}
+	}()
 
 	cloneCtx, cancel := context.WithTimeout(ctx, wikiCloneTimeout)
 	defer cancel()
