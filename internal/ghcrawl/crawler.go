@@ -7,8 +7,10 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/drpaneas/devlica/internal/textutil"
 	"github.com/google/go-github/v68/github"
@@ -28,21 +30,35 @@ const (
 	maxStarredRepos   = 500
 	maxGists          = 100
 	maxEvents         = 300
+	maxGistContentLen = 2000
 )
 
 // Crawler fetches a GitHub user's repositories, commits, PRs, and comments.
 type Crawler struct {
-	client   *github.Client
-	maxRepos int
+	pool          *TokenPool
+	gqlPool       *GraphQLPool
+	privateClient *github.Client
+	privateToken  string
+	maxRepos      int
+	exhaustive    bool
 }
 
-// NewCrawler returns a Crawler authenticated with the given token.
+// NewCrawler returns a Crawler authenticated with the given tokens.
 // maxRepos controls how many repos get deep-crawled (commits, PRs, code samples).
-func NewCrawler(token string, maxRepos int) *Crawler {
-	return &Crawler{
-		client:   newGitHubClient(token),
-		maxRepos: maxRepos,
+// privateToken is optional; when set it enables fetching private repos via the
+// authenticated user's /user/repos endpoint.
+func NewCrawler(tokens []string, privateToken string, maxRepos int, exhaustive bool) *Crawler {
+	c := &Crawler{
+		pool:         NewTokenPool(tokens),
+		gqlPool:      NewGraphQLPool(tokens),
+		privateToken: privateToken,
+		maxRepos:     maxRepos,
+		exhaustive:   exhaustive,
 	}
+	if privateToken != "" {
+		c.privateClient = newGitHubClient(privateToken)
+	}
+	return c
 }
 
 // Crawl collects activity data for the given GitHub user.
@@ -67,10 +83,15 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 		return nil, fmt.Errorf("listing repos: %w", err)
 	}
 
-	// Select a diverse set of repos for deep-crawling, ensuring coverage
-	// across languages, time periods, and activity levels rather than
-	// just the most recently pushed repos.
-	deepCrawl := selectDiverseRepos(repos, c.maxRepos, username)
+	// In exhaustive mode, deep-crawl all repos. Otherwise select a diverse
+	// subset to keep runtime bounded.
+	deepCrawl := repos
+	if !c.exhaustive {
+		// Select a diverse set of repos for deep-crawling, ensuring coverage
+		// across languages, time periods, and activity levels rather than
+		// just the most recently pushed repos.
+		deepCrawl = selectDiverseRepos(repos, c.maxRepos, username)
+	}
 
 	deepCrawled := make(map[string]bool, len(deepCrawl))
 	for _, r := range deepCrawl {
@@ -130,7 +151,8 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 	for _, r := range result.Repos {
 		crawledRepos[r.FullName] = true
 	}
-	extRepos, err := c.fetchExternalReviews(ctx, username, crawledRepos)
+	since := result.User.CreatedAt
+	extRepos, err := c.fetchExternalReviews(ctx, username, crawledRepos, since)
 	if err != nil {
 		slog.Warn("could not fetch external reviews", "error", err)
 	} else if len(extRepos) > 0 {
@@ -151,7 +173,7 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		comments, err := c.fetchIssueComments(ctx, username)
+		comments, err := c.fetchIssueComments(ctx, username, since)
 		if err != nil {
 			slog.Warn("could not fetch issue comments", "error", err)
 		} else {
@@ -216,7 +238,7 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		issues, err := c.fetchAuthoredIssues(ctx, username)
+		issues, err := c.fetchAuthoredIssues(ctx, username, since)
 		if err != nil {
 			slog.Warn("could not fetch authored issues", "error", err)
 		} else {
@@ -229,7 +251,7 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		extPRs, err := c.fetchExternalPRs(ctx, username)
+		extPRs, err := c.fetchExternalPRs(ctx, username, since)
 		if err != nil {
 			slog.Warn("could not fetch external PRs", "error", err)
 		} else {
@@ -239,13 +261,31 @@ func (c *Crawler) Crawl(ctx context.Context, username string) (*CrawlResult, err
 		}
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		discussions := c.fetchDiscussions(ctx, username, result.Repos)
+		mu.Lock()
+		result.Discussions = discussions
+		mu.Unlock()
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		projects := c.fetchProjects(ctx, username)
+		mu.Lock()
+		result.Projects = projects
+		mu.Unlock()
+	}()
+
 	wg.Wait()
 
 	return result, nil
 }
 
 func (c *Crawler) fetchProfile(ctx context.Context, username string) (UserProfile, error) {
-	user, _, err := c.client.Users.Get(ctx, username)
+	user, _, err := c.pool.Next().Users.Get(ctx, username)
 	if err != nil {
 		return UserProfile{}, err
 	}
@@ -267,7 +307,7 @@ func (c *Crawler) fetchProfile(ctx context.Context, username string) (UserProfil
 }
 
 func (c *Crawler) fetchProfileREADME(ctx context.Context, username string) (string, error) {
-	readme, _, err := c.client.Repositories.GetReadme(ctx, username, username, nil)
+	readme, _, err := c.pool.Next().Repositories.GetReadme(ctx, username, username, nil)
 	if err != nil {
 		return "", err
 	}
@@ -288,7 +328,7 @@ func (c *Crawler) fetchRepos(ctx context.Context, username string) ([]*github.Re
 
 	var all []*github.Repository
 	for {
-		repos, resp, err := c.client.Repositories.ListByUser(ctx, username, opts)
+		repos, resp, err := c.pool.Next().Repositories.ListByUser(ctx, username, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -299,9 +339,65 @@ func (c *Crawler) fetchRepos(ctx context.Context, username string) ([]*github.Re
 		opts.Page = resp.NextPage
 	}
 
+	if c.privateClient != nil {
+		privateRepos, err := c.fetchPrivateRepos(ctx, username)
+		if err != nil {
+			slog.Warn("could not fetch private repos", "error", err)
+		} else {
+			seen := make(map[string]bool, len(all))
+			for _, r := range all {
+				seen[r.GetFullName()] = true
+			}
+			for _, r := range privateRepos {
+				if !seen[r.GetFullName()] {
+					all = append(all, r)
+				}
+			}
+		}
+	}
+
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].GetPushedAt().After(all[j].GetPushedAt().Time)
 	})
+	return all, nil
+}
+
+// fetchPrivateRepos uses the private token to list private repos, but only
+// when that token authenticates as the same user being analyzed.
+func (c *Crawler) fetchPrivateRepos(ctx context.Context, username string) ([]*github.Repository, error) {
+	authUser, _, err := c.privateClient.Users.Get(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("resolving private token identity: %w", err)
+	}
+	authLogin := authUser.GetLogin()
+	if !privateTokenMatchesUsername(authLogin, username) {
+		slog.Warn("skipping private repos: private token does not match requested user",
+			"token_user", authLogin,
+			"requested_user", username,
+		)
+		return nil, nil
+	}
+
+	opts := &github.RepositoryListByAuthenticatedUserOptions{
+		Sort:        "pushed",
+		Direction:   "desc",
+		Visibility:  "private",
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	var all []*github.Repository
+	for {
+		repos, resp, err := c.privateClient.Repositories.ListByAuthenticatedUser(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, repos...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	slog.Info("fetched private repos", "count", len(all))
 	return all, nil
 }
 
@@ -330,42 +426,88 @@ func (c *Crawler) crawlRepo(ctx context.Context, username string, repo *github.R
 		rd.License = repo.GetLicense().GetSPDXID()
 	}
 
-	langs, _, err := c.client.Repositories.ListLanguages(ctx, owner, name)
+	langs, _, err := c.pool.Next().Repositories.ListLanguages(ctx, owner, name)
 	if err == nil {
 		rd.Languages = langs
 	}
 
+	repoPRs := c.fetchRepoPRs(ctx, owner, name)
 	rd.Commits = c.fetchCommits(ctx, owner, name, username)
-	rd.PRs = c.fetchPRs(ctx, owner, name, username)
-	rd.ReviewComments = c.fetchReviewComments(ctx, owner, name, username)
-	if len(rd.ReviewComments) == 0 {
-		slog.Debug("no line-level review comments, trying PR conversation comments", "repo", repo.GetFullName())
-		rd.PRComments = c.fetchPRConversationComments(ctx, owner, name, username)
+	rd.PRs = c.fetchPRs(ctx, owner, name, username, repoPRs)
+	rd.Reviews = c.fetchReviews(ctx, owner, name, username, repoPRs)
+	rd.ReviewComments = c.fetchReviewComments(ctx, owner, name, username, repoPRs)
+	if len(rd.Reviews) == 0 && len(rd.ReviewComments) == 0 {
+		slog.Debug("no submitted reviews or line comments, trying PR conversation comments", "repo", repo.GetFullName())
+		rd.PRComments = c.fetchPRConversationComments(ctx, owner, name, username, repoPRs)
 	}
 	rd.CodeSamples = c.fetchCodeSamples(ctx, owner, name)
 	rd.Releases = c.fetchReleases(ctx, owner, name, username)
+	if rd.IsOwner && repo.GetHasWiki() {
+		rd.WikiPages = fetchWikiPages(ctx, owner, name, c.privateToken)
+	}
 
 	return rd, nil
 }
 
+func (c *Crawler) fetchRepoPRs(ctx context.Context, owner, repo string) []*github.PullRequest {
+	perPage := maxPRsPerRepo
+	if c.exhaustive {
+		perPage = 100
+	}
+	opts := &github.PullRequestListOptions{
+		State:       "all",
+		Sort:        "updated",
+		Direction:   "desc",
+		ListOptions: github.ListOptions{PerPage: perPage},
+	}
+
+	var result []*github.PullRequest
+	for {
+		prs, resp, err := c.pool.Next().PullRequests.List(ctx, owner, repo, opts)
+		if err != nil {
+			slog.Debug("could not list PRs", "repo", owner+"/"+repo, "error", err)
+			return result
+		}
+		result = append(result, prs...)
+		if !c.exhaustive || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return result
+}
+
 func (c *Crawler) fetchCommits(ctx context.Context, owner, repo, author string) []CommitData {
-	// Fetch all available commits (up to maxCommitsPerRepo) to get the full
-	// timeline, then sample evenly across the history for patch details so
-	// we capture how the developer's style evolved over time.
+	// In default mode, fetch recent commits (up to maxCommitsPerRepo) and
+	// sample patch details. In exhaustive mode, paginate all commits and
+	// fetch patch details for every commit.
+	perPage := maxCommitsPerRepo
+	if c.exhaustive {
+		perPage = 100
+	}
 	opts := &github.CommitsListOptions{
 		Author:      author,
-		ListOptions: github.ListOptions{PerPage: maxCommitsPerRepo},
+		ListOptions: github.ListOptions{PerPage: perPage},
 	}
 
-	commits, _, err := c.client.Repositories.ListCommits(ctx, owner, repo, opts)
-	if err != nil {
-		slog.Debug("could not list commits", "repo", owner+"/"+repo, "error", err)
-		return nil
+	var commits []*github.RepositoryCommit
+	for {
+		page, resp, err := c.pool.Next().Repositories.ListCommits(ctx, owner, repo, opts)
+		if err != nil {
+			slog.Debug("could not list commits", "repo", owner+"/"+repo, "error", err)
+			return nil
+		}
+		commits = append(commits, page...)
+		if !c.exhaustive || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 
-	// Pick evenly spaced indices for patch fetching (20 patches spread
-	// across the full commit list instead of only the most recent 20).
-	const maxPatches = 20
+	maxPatches := 20
+	if c.exhaustive {
+		maxPatches = len(commits)
+	}
 	patchIndices := spreadIndices(len(commits), maxPatches)
 	patchSet := make(map[int]bool, len(patchIndices))
 	for _, i := range patchIndices {
@@ -381,7 +523,7 @@ func (c *Crawler) fetchCommits(ctx context.Context, owner, repo, author string) 
 		}
 
 		if patchSet[i] {
-			detail, _, err := c.client.Repositories.GetCommit(ctx, owner, repo, cm.GetSHA(), nil)
+			detail, _, err := c.pool.Next().Repositories.GetCommit(ctx, owner, repo, cm.GetSHA(), nil)
 			if err == nil {
 				cd.Patch = extractPatch(detail.Files)
 				cd.Additions = detail.GetStats().GetAdditions()
@@ -438,39 +580,31 @@ func extractPatch(files []*github.CommitFile) string {
 	return b.String()
 }
 
-func (c *Crawler) fetchPRs(ctx context.Context, owner, repo, username string) []PullRequestData {
-	opts := &github.PullRequestListOptions{
-		State:       "all",
-		Sort:        "updated",
-		Direction:   "desc",
-		ListOptions: github.ListOptions{PerPage: maxPRsPerRepo},
-	}
-
-	prs, _, err := c.client.PullRequests.List(ctx, owner, repo, opts)
-	if err != nil {
-		slog.Debug("could not list PRs", "repo", owner+"/"+repo, "error", err)
-		return nil
-	}
-
+func (c *Crawler) fetchPRs(ctx context.Context, owner, repo, username string, prs []*github.PullRequest) []PullRequestData {
 	var result []PullRequestData
 	for _, pr := range prs {
 		if !strings.EqualFold(pr.GetUser().GetLogin(), username) {
 			continue
 		}
+		detail := pr
+		full, _, err := c.pool.Next().PullRequests.Get(ctx, owner, repo, pr.GetNumber())
+		if err == nil {
+			detail = full
+		}
 		prd := PullRequestData{
 			Repo:         owner + "/" + repo,
 			Number:       pr.GetNumber(),
 			Title:        pr.GetTitle(),
+			URL:          pr.GetHTMLURL(),
 			Body:         truncate(pr.GetBody(), 2000),
+			Author:       pr.GetUser().GetLogin(),
 			State:        pr.GetState(),
 			Date:         pr.GetCreatedAt().Time,
-			Additions:    pr.GetAdditions(),
-			Deletions:    pr.GetDeletions(),
-			ChangedFiles: pr.GetChangedFiles(),
+			Additions:    detail.GetAdditions(),
+			Deletions:    detail.GetDeletions(),
+			ChangedFiles: detail.GetChangedFiles(),
 		}
-		for _, lbl := range pr.Labels {
-			prd.Labels = append(prd.Labels, lbl.GetName())
-		}
+		prd.Labels = prLabelNames(detail)
 		if pr.MergedAt != nil {
 			t := pr.GetMergedAt().Time
 			prd.MergedAt = &t
@@ -484,88 +618,222 @@ func (c *Crawler) fetchPRs(ctx context.Context, owner, repo, username string) []
 	return result
 }
 
-func (c *Crawler) fetchReviewComments(ctx context.Context, owner, repo, username string) []ReviewComment {
+func prLabelNames(pr *github.PullRequest) []string {
+	var labels []string
+	for _, lbl := range pr.Labels {
+		labels = append(labels, lbl.GetName())
+	}
+	return labels
+}
+
+func (c *Crawler) fetchReviews(ctx context.Context, owner, repo, username string, prs []*github.PullRequest) []ReviewData {
+	detailCache := make(map[int]*github.PullRequest)
+	loadDetail := func(number int, fallback *github.PullRequest) *github.PullRequest {
+		if detail, ok := detailCache[number]; ok {
+			return detail
+		}
+		detail, _, err := c.pool.Next().PullRequests.Get(ctx, owner, repo, number)
+		if err != nil {
+			detailCache[number] = fallback
+			return fallback
+		}
+		detailCache[number] = detail
+		return detail
+	}
+
+	var result []ReviewData
+	limit := c.limit(maxReviewsPerRepo)
+	for _, pr := range prs {
+		if strings.EqualFold(pr.GetUser().GetLogin(), username) {
+			continue
+		}
+		opts := &github.ListOptions{PerPage: 100}
+		for {
+			reviews, resp, err := c.pool.Next().PullRequests.ListReviews(ctx, owner, repo, pr.GetNumber(), opts)
+			if err != nil {
+				slog.Debug("could not list reviews", "repo", owner+"/"+repo, "number", pr.GetNumber(), "error", err)
+				break
+			}
+			for _, review := range reviews {
+				if !strings.EqualFold(review.GetUser().GetLogin(), username) {
+					continue
+				}
+				if strings.EqualFold(review.GetState(), "PENDING") {
+					continue
+				}
+				detail := loadDetail(pr.GetNumber(), pr)
+				result = append(result, ReviewData{
+					Repo:               owner + "/" + repo,
+					PRNumber:           pr.GetNumber(),
+					PRTitle:            pr.GetTitle(),
+					PRAuthor:           pr.GetUser().GetLogin(),
+					Body:               truncate(review.GetBody(), 1000),
+					State:              review.GetState(),
+					SubmittedAt:        review.GetSubmittedAt().Time,
+					CommitID:           review.GetCommitID(),
+					URL:                review.GetHTMLURL(),
+					Labels:             prLabelNames(detail),
+					Additions:          detail.GetAdditions(),
+					Deletions:          detail.GetDeletions(),
+					ChangedFiles:       detail.GetChangedFiles(),
+					ReviewCommentCount: detail.GetReviewComments(),
+				})
+				if c.reachedLimit(len(result), limit) {
+					return result
+				}
+			}
+			if !c.exhaustive || resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
+		}
+	}
+	return result
+}
+
+func (c *Crawler) fetchReviewComments(ctx context.Context, owner, repo, username string, prs []*github.PullRequest) []ReviewComment {
 	opts := &github.PullRequestListCommentsOptions{
 		Sort:        "created",
 		Direction:   "desc",
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
-	comments, _, err := c.client.PullRequests.ListComments(ctx, owner, repo, 0, opts)
-	if err != nil {
-		slog.Debug("could not list review comments", "repo", owner+"/"+repo, "error", err)
-		return nil
-	}
-
-	var result []ReviewComment
-	for _, cm := range comments {
-		if !strings.EqualFold(cm.GetUser().GetLogin(), username) {
-			continue
-		}
-		result = append(result, ReviewComment{
-			Repo:     owner + "/" + repo,
-			Body:     truncate(cm.GetBody(), 1000),
-			Path:     cm.GetPath(),
-			DiffHunk: truncate(cm.GetDiffHunk(), 2000),
-			Date:     cm.GetCreatedAt().Time,
-		})
-		if len(result) >= maxReviewsPerRepo {
-			break
-		}
-	}
-	return result
-}
-
-func (c *Crawler) fetchPRConversationComments(ctx context.Context, owner, repo, username string) []Comment {
-	opts := &github.PullRequestListOptions{
-		State:       "all",
-		Sort:        "updated",
-		Direction:   "desc",
-		ListOptions: github.ListOptions{PerPage: maxPRsPerRepo},
-	}
-
-	prs, _, err := c.client.PullRequests.List(ctx, owner, repo, opts)
-	if err != nil {
-		slog.Debug("could not list PRs for conversation comments", "repo", owner+"/"+repo, "error", err)
-		return nil
-	}
-
-	var result []Comment
+	prByNumber := make(map[int]*github.PullRequest, len(prs))
 	for _, pr := range prs {
-		if strings.EqualFold(pr.GetUser().GetLogin(), username) {
-			continue
-		}
-		if len(result) >= maxReviewsPerRepo {
-			break
-		}
-		comments, _, err := c.client.Issues.ListComments(ctx, owner, repo, pr.GetNumber(), &github.IssueListCommentsOptions{
-			Sort:        github.String("created"),
-			Direction:   github.String("desc"),
-			ListOptions: github.ListOptions{PerPage: 30},
-		})
+		prByNumber[pr.GetNumber()] = pr
+	}
+	loadedByNumber := make(map[int]*github.PullRequest)
+	var result []ReviewComment
+	limit := c.limit(maxReviewsPerRepo)
+	for {
+		comments, resp, err := c.pool.Next().PullRequests.ListComments(ctx, owner, repo, 0, opts)
 		if err != nil {
-			continue
+			slog.Debug("could not list review comments", "repo", owner+"/"+repo, "error", err)
+			break
 		}
 		for _, cm := range comments {
 			if !strings.EqualFold(cm.GetUser().GetLogin(), username) {
 				continue
 			}
-			result = append(result, Comment{
-				Repo: owner + "/" + repo,
-				Body: truncate(cm.GetBody(), 1000),
-				URL:  cm.GetHTMLURL(),
-				Date: cm.GetCreatedAt().Time,
+			prNumber := pullRequestNumberFromURL(cm.GetPullRequestURL())
+			prTitle := ""
+			prAuthor := ""
+			pr := loadPullRequest(
+				prNumber,
+				prByNumber,
+				loadedByNumber,
+				func(number int) (*github.PullRequest, error) {
+					pr, _, err := c.pool.Next().PullRequests.Get(ctx, owner, repo, number)
+					return pr, err
+				},
+			)
+			if pr != nil {
+				prTitle = pr.GetTitle()
+				prAuthor = pr.GetUser().GetLogin()
+				if strings.EqualFold(prAuthor, username) {
+					continue
+				}
+			}
+			result = append(result, ReviewComment{
+				Repo:     owner + "/" + repo,
+				PRNumber: prNumber,
+				PRTitle:  prTitle,
+				PRAuthor: prAuthor,
+				Body:     truncate(cm.GetBody(), 1000),
+				Path:     cm.GetPath(),
+				DiffHunk: truncate(cm.GetDiffHunk(), 2000),
+				URL:      cm.GetHTMLURL(),
+				Date:     cm.GetCreatedAt().Time,
 			})
-			if len(result) >= maxReviewsPerRepo {
+			if c.reachedLimit(len(result), limit) {
+				return result
+			}
+		}
+		if !c.exhaustive || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return result
+}
+
+func loadPullRequest(
+	prNumber int,
+	existing map[int]*github.PullRequest,
+	loaded map[int]*github.PullRequest,
+	fetch func(int) (*github.PullRequest, error),
+) *github.PullRequest {
+	if prNumber <= 0 {
+		return nil
+	}
+	if pr, ok := existing[prNumber]; ok {
+		return pr
+	}
+	if pr, ok := loaded[prNumber]; ok {
+		return pr
+	}
+	pr, err := fetch(prNumber)
+	if err != nil {
+		loaded[prNumber] = nil
+		return nil
+	}
+	loaded[prNumber] = pr
+	return pr
+}
+
+func (c *Crawler) fetchPRConversationComments(ctx context.Context, owner, repo, username string, prs []*github.PullRequest) []Comment {
+	var result []Comment
+	limit := c.limit(maxReviewsPerRepo)
+	perPage := 30
+	if c.exhaustive {
+		perPage = 100
+	}
+	for _, pr := range prs {
+		if strings.EqualFold(pr.GetUser().GetLogin(), username) {
+			continue
+		}
+		if c.reachedLimit(len(result), limit) {
+			break
+		}
+		opts := &github.IssueListCommentsOptions{
+			Sort:        github.String("created"),
+			Direction:   github.String("desc"),
+			ListOptions: github.ListOptions{PerPage: perPage},
+		}
+		for {
+			comments, resp, err := c.pool.Next().Issues.ListComments(ctx, owner, repo, pr.GetNumber(), opts)
+			if err != nil {
 				break
 			}
+			for _, cm := range comments {
+				if !strings.EqualFold(cm.GetUser().GetLogin(), username) {
+					continue
+				}
+				result = append(result, Comment{
+					Repo:   owner + "/" + repo,
+					Author: cm.GetUser().GetLogin(),
+					Body:   truncate(cm.GetBody(), 1000),
+					URL:    cm.GetHTMLURL(),
+					Date:   cm.GetCreatedAt().Time,
+				})
+				if c.reachedLimit(len(result), limit) {
+					break
+				}
+			}
+			if c.reachedLimit(len(result), limit) {
+				break
+			}
+			if !c.exhaustive || resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
 		}
 	}
 	return result
 }
 
 func (c *Crawler) fetchCodeSamples(ctx context.Context, owner, repo string) []CodeSample {
-	tree, _, err := c.client.Git.GetTree(ctx, owner, repo, "HEAD", true)
+	tree, _, err := c.pool.Next().Git.GetTree(ctx, owner, repo, "HEAD", true)
 	if err != nil {
 		return nil
 	}
@@ -592,11 +860,12 @@ func (c *Crawler) fetchCodeSamples(ctx context.Context, owner, repo string) []Co
 	}
 
 	var samples []CodeSample
+	limit := c.limit(maxCodeSamples + 3)
 	for _, p := range workflows {
-		if len(samples) >= maxCodeSamples+3 {
+		if c.reachedLimit(len(samples), limit) {
 			break
 		}
-		fileContent, _, _, err := c.client.Repositories.GetContents(ctx, owner, repo, p, nil)
+		fileContent, _, _, err := c.pool.Next().Repositories.GetContents(ctx, owner, repo, p, nil)
 		if err != nil || fileContent == nil {
 			continue
 		}
@@ -608,10 +877,10 @@ func (c *Crawler) fetchCodeSamples(ctx context.Context, owner, repo string) []Co
 	}
 
 	for _, p := range candidates {
-		if len(samples) >= maxCodeSamples+3 {
+		if c.reachedLimit(len(samples), limit) {
 			break
 		}
-		fileContent, _, _, err := c.client.Repositories.GetContents(ctx, owner, repo, p, nil)
+		fileContent, _, _, err := c.pool.Next().Repositories.GetContents(ctx, owner, repo, p, nil)
 		if err != nil || fileContent == nil {
 			continue
 		}
@@ -625,41 +894,40 @@ func (c *Crawler) fetchCodeSamples(ctx context.Context, owner, repo string) []Co
 }
 
 func (c *Crawler) fetchReleases(ctx context.Context, owner, repo, username string) []ReleaseData {
-	opts := &github.ListOptions{PerPage: 30}
-	releases, _, err := c.client.Repositories.ListReleases(ctx, owner, repo, opts)
-	if err != nil {
-		slog.Debug("could not list releases", "repo", owner+"/"+repo, "error", err)
-		return nil
-	}
-
 	var result []ReleaseData
-	for _, rel := range releases {
-		if !strings.EqualFold(rel.GetAuthor().GetLogin(), username) {
-			continue
+	perPage := 30
+	if c.exhaustive {
+		perPage = 100
+	}
+	opts := &github.ListOptions{PerPage: perPage}
+	for {
+		releases, resp, err := c.pool.Next().Repositories.ListReleases(ctx, owner, repo, opts)
+		if err != nil {
+			slog.Debug("could not list releases", "repo", owner+"/"+repo, "error", err)
+			return result
 		}
-		result = append(result, ReleaseData{
-			Repo:      owner + "/" + repo,
-			TagName:   rel.GetTagName(),
-			Name:      rel.GetName(),
-			Body:      truncate(rel.GetBody(), 2000),
-			CreatedAt: rel.GetCreatedAt().Time,
-		})
+		for _, rel := range releases {
+			if !strings.EqualFold(rel.GetAuthor().GetLogin(), username) {
+				continue
+			}
+			result = append(result, ReleaseData{
+				Repo:      owner + "/" + repo,
+				TagName:   rel.GetTagName(),
+				Name:      rel.GetName(),
+				Body:      truncate(rel.GetBody(), 2000),
+				CreatedAt: rel.GetCreatedAt().Time,
+			})
+		}
+		if !c.exhaustive || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return result
 }
 
-func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, crawledRepos map[string]bool) ([]RepoData, error) {
+func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, crawledRepos map[string]bool, since time.Time) ([]RepoData, error) {
 	query := fmt.Sprintf("commenter:%s is:pr -user:%s", username, username)
-	searchOpts := &github.SearchOptions{
-		Sort:        "updated",
-		Order:       "desc",
-		ListOptions: github.ListOptions{PerPage: 30},
-	}
-
-	issues, _, err := c.client.Search.Issues(ctx, query, searchOpts)
-	if err != nil {
-		return nil, err
-	}
 
 	type prRef struct {
 		owner  string
@@ -667,17 +935,58 @@ func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, cra
 		number int
 	}
 
+	reviewLimit := c.limit(maxReviewsPerRepo)
 	repoToPRs := make(map[string][]prRef)
-	for _, issue := range issues.Issues {
-		owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
+
+	if c.exhaustive {
+		issues, err := c.windowedSearchIssuesWithQualifier(ctx, query, since, "updated")
 		if err != nil {
-			continue
+			return nil, err
 		}
-		fullName := owner + "/" + repo
-		if crawledRepos[fullName] {
-			continue
+		for _, issue := range issues {
+			owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
+			if err != nil {
+				continue
+			}
+			fullName := owner + "/" + repo
+			if crawledRepos[fullName] {
+				continue
+			}
+			repoToPRs[fullName] = append(repoToPRs[fullName], prRef{owner, repo, issue.GetNumber()})
 		}
-		repoToPRs[fullName] = append(repoToPRs[fullName], prRef{owner, repo, issue.GetNumber()})
+	} else {
+		searchOpts := &github.SearchOptions{
+			Sort:        "updated",
+			Order:       "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		searchLimit := c.limit(maxSearchResults)
+		totalRefs := 0
+		for {
+			issues, resp, err := c.pool.Next().Search.Issues(ctx, query, searchOpts)
+			if err != nil {
+				return nil, err
+			}
+			for _, issue := range issues.Issues {
+				owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
+				if err != nil {
+					continue
+				}
+				fullName := owner + "/" + repo
+				if crawledRepos[fullName] {
+					continue
+				}
+				repoToPRs[fullName] = append(repoToPRs[fullName], prRef{owner, repo, issue.GetNumber()})
+				totalRefs++
+				if c.reachedLimit(totalRefs, searchLimit) {
+					break
+				}
+			}
+			if c.reachedLimit(totalRefs, searchLimit) || resp.NextPage == 0 {
+				break
+			}
+			searchOpts.Page = resp.NextPage
+		}
 	}
 
 	var result []RepoData
@@ -689,59 +998,116 @@ func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, cra
 		}
 
 		for _, ref := range refs {
-			rc, _, err := c.client.PullRequests.ListComments(ctx, ref.owner, ref.repo, ref.number, &github.PullRequestListCommentsOptions{
+			pr, _, err := c.pool.Next().PullRequests.Get(ctx, ref.owner, ref.repo, ref.number)
+			if err == nil && pr != nil {
+				opts := &github.ListOptions{PerPage: 100}
+				for {
+					reviews, resp, err := c.pool.Next().PullRequests.ListReviews(ctx, ref.owner, ref.repo, ref.number, opts)
+					if err != nil {
+						break
+					}
+					for _, review := range reviews {
+						if !strings.EqualFold(review.GetUser().GetLogin(), username) {
+							continue
+						}
+						if strings.EqualFold(review.GetState(), "PENDING") {
+							continue
+						}
+						rd.Reviews = append(rd.Reviews, ReviewData{
+							Repo:               fullName,
+							PRNumber:           ref.number,
+							PRTitle:            pr.GetTitle(),
+							PRAuthor:           pr.GetUser().GetLogin(),
+							Body:               truncate(review.GetBody(), 1000),
+							State:              review.GetState(),
+							SubmittedAt:        review.GetSubmittedAt().Time,
+							CommitID:           review.GetCommitID(),
+							URL:                review.GetHTMLURL(),
+							Labels:             prLabelNames(pr),
+							Additions:          pr.GetAdditions(),
+							Deletions:          pr.GetDeletions(),
+							ChangedFiles:       pr.GetChangedFiles(),
+							ReviewCommentCount: pr.GetReviewComments(),
+						})
+						if c.reachedLimit(len(rd.Reviews), reviewLimit) {
+							break
+						}
+					}
+					if c.reachedLimit(len(rd.Reviews), reviewLimit) || !c.exhaustive || resp.NextPage == 0 {
+						break
+					}
+					opts.Page = resp.NextPage
+				}
+			}
+
+			rcOpts := &github.PullRequestListCommentsOptions{
 				Sort:        "created",
 				Direction:   "desc",
-				ListOptions: github.ListOptions{PerPage: 50},
-			})
-			if err == nil {
+				ListOptions: github.ListOptions{PerPage: 100},
+			}
+			for {
+				rc, resp, err := c.pool.Next().PullRequests.ListComments(ctx, ref.owner, ref.repo, ref.number, rcOpts)
+				if err != nil {
+					break
+				}
 				for _, cm := range rc {
 					if !strings.EqualFold(cm.GetUser().GetLogin(), username) {
 						continue
 					}
 					rd.ReviewComments = append(rd.ReviewComments, ReviewComment{
 						Repo:     fullName,
+						PRNumber: ref.number,
+						PRTitle:  prTitle(pr),
+						PRAuthor: prAuthor(pr),
 						Body:     truncate(cm.GetBody(), 1000),
 						Path:     cm.GetPath(),
 						DiffHunk: truncate(cm.GetDiffHunk(), 2000),
+						URL:      cm.GetHTMLURL(),
 						Date:     cm.GetCreatedAt().Time,
 					})
-					if len(rd.ReviewComments) >= maxReviewsPerRepo {
+					if c.reachedLimit(len(rd.ReviewComments), reviewLimit) {
 						break
 					}
 				}
-			}
-			if len(rd.ReviewComments) >= maxReviewsPerRepo {
-				break
+				if c.reachedLimit(len(rd.ReviewComments), reviewLimit) || !c.exhaustive || resp.NextPage == 0 {
+					break
+				}
+				rcOpts.Page = resp.NextPage
 			}
 
-			ic, _, err := c.client.Issues.ListComments(ctx, ref.owner, ref.repo, ref.number, &github.IssueListCommentsOptions{
+			icOpts := &github.IssueListCommentsOptions{
 				Sort:        github.String("created"),
 				Direction:   github.String("desc"),
-				ListOptions: github.ListOptions{PerPage: 30},
-			})
-			if err == nil {
+				ListOptions: github.ListOptions{PerPage: 100},
+			}
+			for {
+				ic, resp, err := c.pool.Next().Issues.ListComments(ctx, ref.owner, ref.repo, ref.number, icOpts)
+				if err != nil {
+					break
+				}
 				for _, cm := range ic {
 					if !strings.EqualFold(cm.GetUser().GetLogin(), username) {
 						continue
 					}
 					rd.PRComments = append(rd.PRComments, Comment{
-						Repo: fullName,
-						Body: truncate(cm.GetBody(), 1000),
-						URL:  cm.GetHTMLURL(),
-						Date: cm.GetCreatedAt().Time,
+						Repo:   fullName,
+						Author: cm.GetUser().GetLogin(),
+						Body:   truncate(cm.GetBody(), 1000),
+						URL:    cm.GetHTMLURL(),
+						Date:   cm.GetCreatedAt().Time,
 					})
-					if len(rd.PRComments) >= maxReviewsPerRepo {
+					if c.reachedLimit(len(rd.PRComments), reviewLimit) {
 						break
 					}
 				}
-			}
-			if len(rd.PRComments) >= maxReviewsPerRepo {
-				break
+				if c.reachedLimit(len(rd.PRComments), reviewLimit) || !c.exhaustive || resp.NextPage == 0 {
+					break
+				}
+				icOpts.Page = resp.NextPage
 			}
 		}
 
-		if len(rd.ReviewComments) > 0 || len(rd.PRComments) > 0 {
+		if len(rd.Reviews) > 0 || len(rd.ReviewComments) > 0 || len(rd.PRComments) > 0 {
 			result = append(result, rd)
 		}
 	}
@@ -749,55 +1115,75 @@ func (c *Crawler) fetchExternalReviews(ctx context.Context, username string, cra
 	return result, nil
 }
 
-func (c *Crawler) fetchIssueComments(ctx context.Context, username string) ([]Comment, error) {
+func (c *Crawler) fetchIssueComments(ctx context.Context, username string, since time.Time) ([]Comment, error) {
 	query := fmt.Sprintf("commenter:%s", username)
-	searchOpts := &github.SearchOptions{
-		Sort:        "updated",
-		Order:       "desc",
-		ListOptions: github.ListOptions{PerPage: 100},
+
+	var searchIssues []*github.Issue
+	if c.exhaustive {
+		var err error
+		searchIssues, err = c.windowedSearchIssuesWithQualifier(ctx, query, since, "updated")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		searchOpts := &github.SearchOptions{
+			Sort:        "updated",
+			Order:       "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		for {
+			issues, resp, err := c.pool.Next().Search.Issues(ctx, query, searchOpts)
+			if err != nil {
+				return nil, err
+			}
+			searchIssues = append(searchIssues, issues.Issues...)
+			if resp.NextPage == 0 || c.reachedLimit(len(searchIssues), c.limit(maxIssueComments)) {
+				break
+			}
+			searchOpts.Page = resp.NextPage
+		}
 	}
 
 	var allComments []Comment
-	for {
-		issues, resp, err := c.client.Search.Issues(ctx, query, searchOpts)
-		if err != nil {
-			return allComments, err
+	limit := c.limit(maxIssueComments)
+	for _, issue := range searchIssues {
+		if c.reachedLimit(len(allComments), limit) {
+			break
 		}
-		for _, issue := range issues.Issues {
-			if len(allComments) >= maxIssueComments {
-				return allComments, nil
-			}
-			owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
+		owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
+		if err != nil {
+			continue
+		}
+		opts := &github.IssueListCommentsOptions{
+			Sort:        github.String("created"),
+			Direction:   github.String("desc"),
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		for {
+			comments, cmResp, err := c.pool.Next().Issues.ListComments(ctx, owner, repo, issue.GetNumber(), opts)
 			if err != nil {
-				continue
-			}
-
-			opts := &github.IssueListCommentsOptions{
-				Sort:        github.String("created"),
-				Direction:   github.String("desc"),
-				ListOptions: github.ListOptions{PerPage: 100},
-			}
-			comments, _, err := c.client.Issues.ListComments(ctx, owner, repo, issue.GetNumber(), opts)
-			if err != nil {
-				continue
+				break
 			}
 			for _, cm := range comments {
 				if strings.EqualFold(cm.GetUser().GetLogin(), username) {
 					allComments = append(allComments, Comment{
-						Repo: owner + "/" + repo,
-						Body: truncate(cm.GetBody(), 1000),
-						URL:  cm.GetHTMLURL(),
-						Date: cm.GetCreatedAt().Time,
+						Repo:   owner + "/" + repo,
+						Author: cm.GetUser().GetLogin(),
+						Body:   truncate(cm.GetBody(), 1000),
+						URL:    cm.GetHTMLURL(),
+						Date:   cm.GetCreatedAt().Time,
 					})
 				}
+				if c.reachedLimit(len(allComments), limit) {
+					break
+				}
 			}
+			if c.reachedLimit(len(allComments), limit) || !c.exhaustive || cmResp.NextPage == 0 {
+				break
+			}
+			opts.Page = cmResp.NextPage
 		}
-		if resp.NextPage == 0 || len(allComments) >= maxIssueComments {
-			break
-		}
-		searchOpts.Page = resp.NextPage
 	}
-
 	return allComments, nil
 }
 
@@ -809,8 +1195,9 @@ func (c *Crawler) fetchStarredRepos(ctx context.Context, username string) ([]Sta
 	}
 
 	var result []StarredRepo
+	limit := c.limit(maxStarredRepos)
 	for {
-		starred, resp, err := c.client.Activity.ListStarred(ctx, username, opts)
+		starred, resp, err := c.pool.Next().Activity.ListStarred(ctx, username, opts)
 		if err != nil {
 			return result, err
 		}
@@ -824,11 +1211,11 @@ func (c *Crawler) fetchStarredRepos(ctx context.Context, username string) ([]Sta
 				Topics:      repo.Topics,
 				Stars:       repo.GetStargazersCount(),
 			})
-			if len(result) >= maxStarredRepos {
+			if c.reachedLimit(len(result), limit) {
 				return result, nil
 			}
 		}
-		if resp.NextPage == 0 {
+		if !c.exhaustive || resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
@@ -842,8 +1229,9 @@ func (c *Crawler) fetchGists(ctx context.Context, username string) ([]GistData, 
 	}
 
 	var result []GistData
+	limit := c.limit(maxGists)
 	for {
-		gists, resp, err := c.client.Gists.List(ctx, username, opts)
+		gists, resp, err := c.pool.Next().Gists.List(ctx, username, opts)
 		if err != nil {
 			return result, err
 		}
@@ -859,14 +1247,15 @@ func (c *Crawler) fetchGists(ctx context.Context, username string) ([]GistData, 
 				gd.Files = append(gd.Files, GistFile{
 					Name:     string(name),
 					Language: f.GetLanguage(),
+					Content:  truncate(f.GetContent(), maxGistContentLen),
 				})
 			}
 			result = append(result, gd)
-			if len(result) >= maxGists {
+			if c.reachedLimit(len(result), limit) {
 				return result, nil
 			}
 		}
-		if resp.NextPage == 0 {
+		if !c.exhaustive || resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
@@ -876,13 +1265,19 @@ func (c *Crawler) fetchGists(ctx context.Context, username string) ([]GistData, 
 
 func (c *Crawler) fetchOrgs(ctx context.Context, username string) ([]string, error) {
 	opts := &github.ListOptions{PerPage: 100}
-	orgs, _, err := c.client.Organizations.List(ctx, username, opts)
-	if err != nil {
-		return nil, err
-	}
 	var result []string
-	for _, org := range orgs {
-		result = append(result, org.GetLogin())
+	for {
+		orgs, resp, err := c.pool.Next().Organizations.List(ctx, username, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, org := range orgs {
+			result = append(result, org.GetLogin())
+		}
+		if !c.exhaustive || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return result, nil
 }
@@ -891,8 +1286,9 @@ func (c *Crawler) fetchEvents(ctx context.Context, username string) ([]EventData
 	opts := &github.ListOptions{PerPage: 100}
 
 	var result []EventData
+	limit := c.limit(maxEvents)
 	for {
-		events, resp, err := c.client.Activity.ListEventsPerformedByUser(ctx, username, true, opts)
+		events, resp, err := c.pool.Next().Activity.ListEventsPerformedByUser(ctx, username, true, opts)
 		if err != nil {
 			return result, err
 		}
@@ -903,11 +1299,11 @@ func (c *Crawler) fetchEvents(ctx context.Context, username string) ([]EventData
 				CreatedAt: ev.GetCreatedAt().Time,
 				Summary:   eventSummary(ev),
 			})
-			if len(result) >= maxEvents {
+			if c.reachedLimit(len(result), limit) {
 				return result, nil
 			}
 		}
-		if resp.NextPage == 0 {
+		if !c.exhaustive || resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
@@ -944,104 +1340,122 @@ func eventSummary(ev *github.Event) string {
 	}
 }
 
-func (c *Crawler) fetchAuthoredIssues(ctx context.Context, username string) ([]IssueData, error) {
+func (c *Crawler) fetchAuthoredIssues(ctx context.Context, username string, since time.Time) ([]IssueData, error) {
 	query := fmt.Sprintf("author:%s is:issue", username)
-	searchOpts := &github.SearchOptions{
-		Sort:        "created",
-		Order:       "desc",
-		ListOptions: github.ListOptions{PerPage: 100},
+
+	var searchIssues []*github.Issue
+	if c.exhaustive {
+		var err error
+		searchIssues, err = c.windowedSearchIssues(ctx, query, since)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		searchOpts := &github.SearchOptions{
+			Sort:        "created",
+			Order:       "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		limit := c.limit(maxSearchResults)
+		for {
+			issues, resp, err := c.pool.Next().Search.Issues(ctx, query, searchOpts)
+			if err != nil {
+				return nil, err
+			}
+			searchIssues = append(searchIssues, issues.Issues...)
+			if resp.NextPage == 0 || c.reachedLimit(len(searchIssues), limit) {
+				break
+			}
+			searchOpts.Page = resp.NextPage
+		}
 	}
 
 	var result []IssueData
-	for {
-		issues, resp, err := c.client.Search.Issues(ctx, query, searchOpts)
+	for _, issue := range searchIssues {
+		owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
 		if err != nil {
-			return result, err
+			continue
 		}
-		for _, issue := range issues.Issues {
-			owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
-			if err != nil {
-				continue
-			}
-			id := IssueData{
-				Repo:      owner + "/" + repo,
-				Number:    issue.GetNumber(),
-				Title:     issue.GetTitle(),
-				Body:      truncate(issue.GetBody(), 2000),
-				State:     issue.GetState(),
-				CreatedAt: issue.GetCreatedAt().Time,
-			}
-			for _, lbl := range issue.Labels {
-				id.Labels = append(id.Labels, lbl.GetName())
-			}
-			result = append(result, id)
-			if len(result) >= maxSearchResults {
-				return result, nil
-			}
+		id := IssueData{
+			Repo:      owner + "/" + repo,
+			Number:    issue.GetNumber(),
+			Title:     issue.GetTitle(),
+			Body:      truncate(issue.GetBody(), 2000),
+			State:     issue.GetState(),
+			CreatedAt: issue.GetCreatedAt().Time,
 		}
-		if resp.NextPage == 0 {
-			break
+		for _, lbl := range issue.Labels {
+			id.Labels = append(id.Labels, lbl.GetName())
 		}
-		searchOpts.Page = resp.NextPage
+		result = append(result, id)
 	}
 	return result, nil
 }
 
-func (c *Crawler) fetchExternalPRs(ctx context.Context, username string) ([]PullRequestData, error) {
+func (c *Crawler) fetchExternalPRs(ctx context.Context, username string, since time.Time) ([]PullRequestData, error) {
 	query := fmt.Sprintf("author:%s is:pr -user:%s", username, username)
-	searchOpts := &github.SearchOptions{
-		Sort:        "created",
-		Order:       "desc",
-		ListOptions: github.ListOptions{PerPage: 100},
+
+	var searchIssues []*github.Issue
+	if c.exhaustive {
+		var err error
+		searchIssues, err = c.windowedSearchIssues(ctx, query, since)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		searchOpts := &github.SearchOptions{
+			Sort:        "created",
+			Order:       "desc",
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		limit := c.limit(maxSearchResults)
+		for {
+			issues, resp, err := c.pool.Next().Search.Issues(ctx, query, searchOpts)
+			if err != nil {
+				return nil, err
+			}
+			searchIssues = append(searchIssues, issues.Issues...)
+			if resp.NextPage == 0 || c.reachedLimit(len(searchIssues), limit) {
+				break
+			}
+			searchOpts.Page = resp.NextPage
+		}
 	}
 
 	var result []PullRequestData
-	for {
-		issues, resp, err := c.client.Search.Issues(ctx, query, searchOpts)
+	for _, issue := range searchIssues {
+		owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
 		if err != nil {
-			return result, err
+			continue
 		}
-		for _, issue := range issues.Issues {
-			owner, repo, err := ownerRepoFromURL(issue.GetRepositoryURL())
-			if err != nil {
-				continue
-			}
-			prd := PullRequestData{
-				Repo:   owner + "/" + repo,
-				Number: issue.GetNumber(),
-				Title:  issue.GetTitle(),
-				Body:   truncate(issue.GetBody(), 2000),
-				State:  issue.GetState(),
-				Date:   issue.GetCreatedAt().Time,
-			}
-			for _, lbl := range issue.Labels {
-				prd.Labels = append(prd.Labels, lbl.GetName())
-			}
-			if issue.ClosedAt != nil {
-				t := issue.GetClosedAt().Time
-				prd.ClosedAt = &t
-			}
-			if issue.PullRequestLinks != nil {
-				pr, _, err := c.client.PullRequests.Get(ctx, owner, repo, issue.GetNumber())
-				if err == nil {
-					prd.Additions = pr.GetAdditions()
-					prd.Deletions = pr.GetDeletions()
-					prd.ChangedFiles = pr.GetChangedFiles()
-					if pr.MergedAt != nil {
-						t := pr.GetMergedAt().Time
-						prd.MergedAt = &t
-					}
+		prd := PullRequestData{
+			Repo:   owner + "/" + repo,
+			Number: issue.GetNumber(),
+			Title:  issue.GetTitle(),
+			Body:   truncate(issue.GetBody(), 2000),
+			State:  issue.GetState(),
+			Date:   issue.GetCreatedAt().Time,
+		}
+		for _, lbl := range issue.Labels {
+			prd.Labels = append(prd.Labels, lbl.GetName())
+		}
+		if issue.ClosedAt != nil {
+			t := issue.GetClosedAt().Time
+			prd.ClosedAt = &t
+		}
+		if issue.PullRequestLinks != nil {
+			pr, _, err := c.pool.Next().PullRequests.Get(ctx, owner, repo, issue.GetNumber())
+			if err == nil {
+				prd.Additions = pr.GetAdditions()
+				prd.Deletions = pr.GetDeletions()
+				prd.ChangedFiles = pr.GetChangedFiles()
+				if pr.MergedAt != nil {
+					t := pr.GetMergedAt().Time
+					prd.MergedAt = &t
 				}
 			}
-			result = append(result, prd)
-			if len(result) >= maxSearchResults {
-				return result, nil
-			}
 		}
-		if resp.NextPage == 0 {
-			break
-		}
-		searchOpts.Page = resp.NextPage
+		result = append(result, prd)
 	}
 	return result, nil
 }
@@ -1159,6 +1573,54 @@ func ownerRepoFromURL(rawURL string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("unexpected repository URL path: %s", u.Path)
 	}
 	return parts[len(parts)-2], parts[len(parts)-1], nil
+}
+
+func pullRequestNumberFromURL(rawURL string) int {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if n, err := strconv.Atoi(parts[i]); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func (c *Crawler) limit(n int) int {
+	if c.exhaustive {
+		return 0
+	}
+	return n
+}
+
+func (c *Crawler) reachedLimit(current, limit int) bool {
+	return limit > 0 && current >= limit
+}
+
+func prTitle(pr *github.PullRequest) string {
+	if pr == nil {
+		return ""
+	}
+	return pr.GetTitle()
+}
+
+func prAuthor(pr *github.PullRequest) string {
+	if pr == nil {
+		return ""
+	}
+	return pr.GetUser().GetLogin()
+}
+
+func privateTokenMatchesUsername(tokenLogin, requestedUsername string) bool {
+	tokenLogin = strings.TrimSpace(tokenLogin)
+	requestedUsername = strings.TrimSpace(requestedUsername)
+	if tokenLogin == "" || requestedUsername == "" {
+		return false
+	}
+	return strings.EqualFold(tokenLogin, requestedUsername)
 }
 
 var interestingFiles = map[string]bool{

@@ -6,6 +6,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/vertex"
 )
 
 type anthropicProvider struct {
@@ -13,18 +14,36 @@ type anthropicProvider struct {
 	model  string
 }
 
-func newAnthropic(apiKey, model string) *anthropicProvider {
-	return &anthropicProvider{
-		client: anthropic.NewClient(
-			option.WithAPIKey(apiKey),
-			option.WithMaxRetries(5),
-		),
-		model: model,
+func newAnthropic(apiKey, model string, useVertexAI bool, vertexRegion, vertexProjectID string) (*anthropicProvider, error) {
+	clientOpts := []option.RequestOption{
+		option.WithMaxRetries(5),
 	}
+	if useVertexAI {
+		vopt, err := newVertexAuthOption(context.Background(), vertexRegion, vertexProjectID)
+		if err != nil {
+			return nil, err
+		}
+		clientOpts = append(clientOpts, vopt)
+	} else {
+		clientOpts = append(clientOpts, option.WithAPIKey(apiKey))
+	}
+	return &anthropicProvider{
+		client: anthropic.NewClient(clientOpts...),
+		model:  model,
+	}, nil
+}
+
+func newVertexAuthOption(ctx context.Context, region, projectID string) (reqOpt option.RequestOption, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("anthropic vertex auth setup failed: %v", r)
+		}
+	}()
+	return vertex.WithGoogleAuth(ctx, region, projectID), nil
 }
 
 func (p *anthropicProvider) Complete(ctx context.Context, system, prompt string, opts *CompleteOptions) (string, error) {
-	maxTokens := int64(4096)
+	maxTokens := int64(16384)
 	if opts != nil && opts.MaxTokens > 0 {
 		maxTokens = int64(opts.MaxTokens)
 	}

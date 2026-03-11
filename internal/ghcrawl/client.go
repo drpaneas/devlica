@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/go-github/v68/github"
@@ -13,17 +14,22 @@ import (
 )
 
 func newGitHubClient(token string) *github.Client {
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	httpClient := &http.Client{
-		Transport: &rateLimitTransport{
-			base: &oauth2.Transport{
-				Source: ts,
-				Base:   http.DefaultTransport,
-			},
-		},
-		Timeout: 30 * time.Second,
+	return github.NewClient(newGitHubHTTPClient(token))
+}
+
+func newGitHubHTTPClient(token string) *http.Client {
+	baseTransport := http.RoundTripper(http.DefaultTransport)
+	if strings.TrimSpace(token) != "" {
+		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+		baseTransport = &oauth2.Transport{
+			Source: ts,
+			Base:   http.DefaultTransport,
+		}
 	}
-	return github.NewClient(httpClient)
+	return &http.Client{
+		Transport: &rateLimitTransport{base: baseTransport},
+		Timeout:   30 * time.Second,
+	}
 }
 
 // rateLimitTransport wraps an http.RoundTripper and pauses when rate-limited.

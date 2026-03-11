@@ -27,21 +27,24 @@ type codingStyleData struct {
 	CodeStyle       string
 	Testing         string
 	ProjectPatterns string
+	CodeExamples    string
 	Traits          string
 }
 
 type reviewerData struct {
 	Username           string
 	ReviewPriorities   string
+	ReviewDecision     string
+	ReviewNits         string
+	ReviewContext      string
 	ReviewVoice        string
-	Communication      string
 	CollaborationStyle string
 }
 
 type developerProfileData struct {
 	Username           string
 	DeveloperInterests string
-	ProjectPatterns    string
+	ActivityPatterns   string
 	CollaborationStyle string
 	Traits             string
 }
@@ -71,6 +74,10 @@ func (g *Generator) Generate(username string, persona *analyzer.Persona) ([]stri
 	if csData.ProjectPatterns == "" {
 		csData.ProjectPatterns = "No specific project pattern data was identified."
 	}
+	csData.CodeExamples = s.CodeExamples
+	if csData.CodeExamples == "" {
+		csData.CodeExamples = "No representative code examples were identified."
+	}
 	if csData.Traits == "" {
 		csData.Traits = "See code style rules above."
 	}
@@ -84,18 +91,26 @@ func (g *Generator) Generate(username string, persona *analyzer.Persona) ([]stri
 	rvData := reviewerData{
 		Username:           username,
 		ReviewPriorities:   s.ReviewPriorities,
+		ReviewDecision:     s.ReviewDecisionStyle,
+		ReviewNits:         s.ReviewNonBlockingNits,
+		ReviewContext:      s.ReviewContext,
 		ReviewVoice:        s.ReviewVoice,
-		Communication:      s.CommunicationPatterns,
 		CollaborationStyle: s.CollaborationStyle,
 	}
 	if rvData.ReviewPriorities == "" {
 		rvData.ReviewPriorities = persona.ReviewStyle
 	}
+	if rvData.ReviewDecision == "" {
+		rvData.ReviewDecision = "No specific approval-threshold data was identified."
+	}
+	if rvData.ReviewNits == "" {
+		rvData.ReviewNits = "No specific non-blocking nit patterns were identified."
+	}
+	if rvData.ReviewContext == "" {
+		rvData.ReviewContext = "No specific context-dependent review behavior was identified."
+	}
 	if rvData.ReviewVoice == "" {
 		rvData.ReviewVoice = "No specific review voice data was identified."
-	}
-	if rvData.Communication == "" {
-		rvData.Communication = persona.Communication
 	}
 	if rvData.CollaborationStyle == "" {
 		rvData.CollaborationStyle = "No specific collaboration data was identified."
@@ -110,15 +125,15 @@ func (g *Generator) Generate(username string, persona *analyzer.Persona) ([]stri
 	dpData := developerProfileData{
 		Username:           username,
 		DeveloperInterests: s.DeveloperInterests,
-		ProjectPatterns:    s.ProjectPatterns,
+		ActivityPatterns:   s.ActivityPatterns,
 		CollaborationStyle: s.CollaborationStyle,
 		Traits:             s.DistinctiveTraits,
 	}
 	if dpData.DeveloperInterests == "" {
 		dpData.DeveloperInterests = persona.DeveloperIdentity
 	}
-	if dpData.ProjectPatterns == "" {
-		dpData.ProjectPatterns = "No specific project pattern data was identified."
+	if dpData.ActivityPatterns == "" {
+		dpData.ActivityPatterns = "No specific activity-pattern data was identified."
 	}
 	if dpData.CollaborationStyle == "" {
 		dpData.CollaborationStyle = "No specific collaboration data was identified."

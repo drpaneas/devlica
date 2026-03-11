@@ -35,6 +35,12 @@ type ReviewPair struct {
 	Score     float64
 }
 
+type dryRunReview struct {
+	Decision string   `json:"decision"`
+	Concerns []string `json:"concerns"`
+	Comment  string   `json:"comment"`
+}
+
 // IterationResult holds the outcome of a single benchmark iteration.
 type IterationResult struct {
 	Iteration int
@@ -150,7 +156,7 @@ func (b *Benchmarker) runIteration(ctx context.Context, persona *analyzer.Person
 
 		iterResult.Pairs = append(iterResult.Pairs, ReviewPair{
 			Original:  ho.Body,
-			Generated: generated,
+			Generated: formatGeneratedReview(generated),
 			Path:      ho.Path,
 			Score:     comp.score,
 		})
@@ -163,14 +169,18 @@ func (b *Benchmarker) runIteration(ctx context.Context, persona *analyzer.Person
 	return iterResult, nil
 }
 
-func (b *Benchmarker) generateDryRunReview(ctx context.Context, persona *analyzer.Persona, ho HeldOutReview) (string, error) {
+func (b *Benchmarker) generateDryRunReview(ctx context.Context, persona *analyzer.Persona, ho HeldOutReview) (*dryRunReview, error) {
 	prompt := fmt.Sprintf(dryRunReviewPrompt,
 		persona.Username,
 		formatPersonaContext(persona),
 		ho.Path,
 		ho.DiffHunk,
 	)
-	return b.provider.Complete(ctx, dryRunSystemPrompt, prompt, nil)
+	raw, err := b.provider.Complete(ctx, dryRunSystemPrompt, prompt, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseDryRunReview(raw)
 }
 
 type comparisonResult struct {
@@ -178,12 +188,12 @@ type comparisonResult struct {
 	feedback string
 }
 
-func (b *Benchmarker) compareReviews(ctx context.Context, ho HeldOutReview, generated string) (*comparisonResult, error) {
+func (b *Benchmarker) compareReviews(ctx context.Context, ho HeldOutReview, generated *dryRunReview) (*comparisonResult, error) {
 	prompt := fmt.Sprintf(comparePrompt,
 		ho.Path,
 		ho.DiffHunk,
 		ho.Body,
-		generated,
+		formatGeneratedReview(generated),
 	)
 	raw, err := b.provider.Complete(ctx, compareSystemPrompt, prompt, nil)
 	if err != nil {
@@ -206,11 +216,15 @@ func (b *Benchmarker) refinePersona(ctx context.Context, persona *analyzer.Perso
 		s.CodingPhilosophy,
 		s.CodeStyleRules,
 		s.ReviewPriorities,
+		s.ReviewDecisionStyle,
+		s.ReviewNonBlockingNits,
+		s.ReviewContext,
 		s.ReviewVoice,
 		s.CommunicationPatterns,
 		s.TestingPhilosophy,
 		s.DistinctiveTraits,
 		s.DeveloperInterests,
+		s.ActivityPatterns,
 		s.ProjectPatterns,
 		s.CollaborationStyle,
 		iter.Feedback,
@@ -238,11 +252,15 @@ func formatPersonaContext(p *analyzer.Persona) string {
 	fmt.Fprintf(&b, "CODING PHILOSOPHY:\n%s\n\n", s.CodingPhilosophy)
 	fmt.Fprintf(&b, "CODE STYLE RULES:\n%s\n\n", s.CodeStyleRules)
 	fmt.Fprintf(&b, "REVIEW PRIORITIES:\n%s\n\n", s.ReviewPriorities)
+	fmt.Fprintf(&b, "REVIEW DECISION STYLE:\n%s\n\n", s.ReviewDecisionStyle)
+	fmt.Fprintf(&b, "REVIEW NON-BLOCKING NITS:\n%s\n\n", s.ReviewNonBlockingNits)
+	fmt.Fprintf(&b, "REVIEW CONTEXT SENSITIVITY:\n%s\n\n", s.ReviewContext)
 	fmt.Fprintf(&b, "REVIEW VOICE:\n%s\n\n", s.ReviewVoice)
 	fmt.Fprintf(&b, "COMMUNICATION PATTERNS:\n%s\n\n", s.CommunicationPatterns)
 	fmt.Fprintf(&b, "TESTING PHILOSOPHY:\n%s\n\n", s.TestingPhilosophy)
 	fmt.Fprintf(&b, "DISTINCTIVE TRAITS:\n%s\n\n", s.DistinctiveTraits)
 	fmt.Fprintf(&b, "DEVELOPER INTERESTS:\n%s\n\n", s.DeveloperInterests)
+	fmt.Fprintf(&b, "ACTIVITY PATTERNS:\n%s\n\n", s.ActivityPatterns)
 	fmt.Fprintf(&b, "PROJECT PATTERNS:\n%s\n\n", s.ProjectPatterns)
 	fmt.Fprintf(&b, "COLLABORATION STYLE:\n%s\n", s.CollaborationStyle)
 	return b.String()
@@ -276,6 +294,41 @@ func parseComparisonResult(raw string) (*comparisonResult, error) {
 		}
 	}
 	return &comparisonResult{score: parsed.Score, feedback: parsed.Feedback}, nil
+}
+
+func parseDryRunReview(raw string) (*dryRunReview, error) {
+	text := stripCodeFences(raw)
+
+	var parsed dryRunReview
+	dec := json.NewDecoder(strings.NewReader(text))
+	if err := dec.Decode(&parsed); err != nil {
+		sanitized := textutil.SanitizeJSON(text)
+		dec2 := json.NewDecoder(strings.NewReader(sanitized))
+		if err2 := dec2.Decode(&parsed); err2 != nil {
+			return nil, fmt.Errorf("invalid dry-run review JSON: %w\nraw (first 500 bytes): %s",
+				err, textutil.Truncate(raw, 500, "..."))
+		}
+	}
+	if parsed.Decision == "" {
+		parsed.Decision = "comment"
+	}
+	if parsed.Comment == "" {
+		parsed.Comment = strings.TrimSpace(text)
+	}
+	return &parsed, nil
+}
+
+func formatGeneratedReview(review *dryRunReview) string {
+	if review == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Decision: %s\n", review.Decision)
+	if len(review.Concerns) > 0 {
+		fmt.Fprintf(&b, "Concerns:\n- %s\n", strings.Join(review.Concerns, "\n- "))
+	}
+	fmt.Fprintf(&b, "Comment:\n%s", review.Comment)
+	return b.String()
 }
 
 func stripCodeFences(s string) string {

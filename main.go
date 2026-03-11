@@ -17,14 +17,15 @@ import (
 	"github.com/drpaneas/devlica/internal/skill"
 )
 
+const (
+	githubSearchHardCap = 1000
+	githubEventsWindow  = 300
+)
+
 func main() {
 	var cfg config.Config
 	var provider string
-	flag.StringVar(&provider, "provider", "anthropic", "LLM provider: openai, anthropic, ollama")
-	flag.StringVar(&cfg.Model, "model", "", "LLM model (default: per-provider)")
-	flag.StringVar(&cfg.OutputDir, "output", "./output", "Output directory for generated skills")
-	flag.IntVar(&cfg.MaxRepos, "max-repos", 10, "Maximum repositories to deep-crawl (commits, PRs, code samples)")
-	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose logging")
+	configureFlags(flag.CommandLine, &cfg, &provider)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: devlica [flags] <username>\n\nFlags:\n")
 		flag.PrintDefaults()
@@ -55,6 +56,15 @@ func main() {
 	}
 }
 
+func configureFlags(fs *flag.FlagSet, cfg *config.Config, provider *string) {
+	fs.StringVar(provider, "provider", "anthropic", "LLM provider: openai, anthropic, ollama")
+	fs.StringVar(&cfg.Model, "model", "", "LLM model (default: per-provider)")
+	fs.StringVar(&cfg.OutputDir, "output", "./output", "Output directory for generated skills")
+	fs.IntVar(&cfg.MaxRepos, "max-repos", 10, "Maximum repositories to deep-crawl (commits, PRs, code samples)")
+	fs.BoolVar(&cfg.Exhaustive, "exhaustive", false, "Crawl exhaustive public GitHub activity data (disables sampling caps)")
+	fs.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose logging")
+}
+
 func run(ctx context.Context, cfg *config.Config) error {
 	level := slog.LevelInfo
 	if cfg.Verbose {
@@ -63,8 +73,27 @@ func run(ctx context.Context, cfg *config.Config) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	slog.Info("starting devlica", "username", cfg.Username, "provider", cfg.Provider, "model", cfg.Model)
+	if cfg.Provider == llm.ProviderAnthropic {
+		authMode := "api_key"
+		if cfg.UseVertexAI {
+			authMode = "vertex"
+		}
+		slog.Info("anthropic auth mode",
+			"mode", authMode,
+			"vertex_region", cfg.VertexRegion,
+			"vertex_project_set", cfg.VertexProjectID != "",
+		)
+	}
+	if cfg.Exhaustive {
+		slog.Warn("github upstream limits still apply in exhaustive mode",
+			"events_limit", githubEventsWindow,
+			"search_limit", githubSearchHardCap,
+			"note", "GitHub events are limited to recent public activity and Search API is capped per query",
+		)
+	}
 
-	crawler := ghcrawl.NewCrawler(cfg.GitHubToken, cfg.MaxRepos)
+	slog.Info("token pool", "tokens", len(cfg.GitHubTokens), "private_token", cfg.PrivateToken != "")
+	crawler := ghcrawl.NewCrawler(cfg.GitHubTokens, cfg.PrivateToken, cfg.MaxRepos, cfg.Exhaustive)
 	slog.Info("crawling github activity")
 	result, err := crawler.Crawl(ctx, cfg.Username)
 	if err != nil {
@@ -82,16 +111,22 @@ func run(ctx context.Context, cfg *config.Config) error {
 		"releases", result.TotalReleases(),
 		"events", len(result.Events),
 		"orgs", len(result.Orgs),
+		"discussions", result.TotalDiscussions(),
+		"projects", result.TotalProjects(),
 	)
+	logLikelyUpstreamTruncation(result, cfg.Exhaustive)
 
 	heldOut := benchmark.SplitReviews(result, benchmark.MaxHeldOut)
 	slog.Info("held out reviews for benchmark", "count", len(heldOut), "remaining_reviews", result.TotalReviews())
 
 	provider, err := llm.NewProvider(llm.ProviderConfig{
-		Name:       cfg.Provider,
-		APIKey:     cfg.APIKey,
-		Model:      cfg.Model,
-		OllamaHost: cfg.OllamaHost,
+		Name:            cfg.Provider,
+		APIKey:          cfg.APIKey,
+		Model:           cfg.Model,
+		OllamaHost:      cfg.OllamaHost,
+		UseVertexAI:     cfg.UseVertexAI,
+		VertexRegion:    cfg.VertexRegion,
+		VertexProjectID: cfg.VertexProjectID,
 	})
 	if err != nil {
 		return fmt.Errorf("creating LLM provider: %w", err)
@@ -132,4 +167,30 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 	slog.Info("done", "skills_generated", len(paths))
 	return nil
+}
+
+func logLikelyUpstreamTruncation(result *ghcrawl.CrawlResult, exhaustive bool) {
+	if !exhaustive {
+		return
+	}
+	if len(result.Events) >= githubEventsWindow {
+		slog.Warn("activity events likely truncated by GitHub public events window",
+			"events_collected", len(result.Events),
+			"window_limit", githubEventsWindow,
+		)
+	}
+	if len(result.AuthoredIssues) >= githubSearchHardCap {
+		slog.Warn("authored issues likely truncated by GitHub Search API cap",
+			"authored_issues_collected", len(result.AuthoredIssues),
+			"search_limit", githubSearchHardCap,
+			"query", "author:<user> is:issue",
+		)
+	}
+	if len(result.ExternalPRs) >= githubSearchHardCap {
+		slog.Warn("external pull requests likely truncated by GitHub Search API cap",
+			"external_prs_collected", len(result.ExternalPRs),
+			"search_limit", githubSearchHardCap,
+			"query", "author:<user> is:pr -user:<user>",
+		)
+	}
 }

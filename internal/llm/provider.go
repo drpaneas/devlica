@@ -23,10 +23,13 @@ type CompleteOptions struct {
 
 // ProviderConfig holds the configuration needed to construct a Provider.
 type ProviderConfig struct {
-	Name       ProviderName
-	APIKey     string
-	Model      string
-	OllamaHost string
+	Name            ProviderName
+	APIKey          string
+	Model           string
+	OllamaHost      string
+	UseVertexAI     bool
+	VertexRegion    string
+	VertexProjectID string
 }
 
 // Provider abstracts an LLM completion backend.
@@ -40,7 +43,7 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 	case ProviderOpenAI:
 		return newOpenAI(cfg.APIKey, cfg.Model), nil
 	case ProviderAnthropic:
-		return newAnthropic(cfg.APIKey, cfg.Model), nil
+		return newAnthropic(cfg.APIKey, cfg.Model, cfg.UseVertexAI, cfg.VertexRegion, cfg.VertexProjectID)
 	case ProviderOllama:
 		return newOllama(cfg.OllamaHost, cfg.Model), nil
 	default:

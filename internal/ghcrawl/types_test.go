@@ -18,12 +18,12 @@ func TestCrawlResult_TotalCommits(t *testing.T) {
 func TestCrawlResult_TotalReviews(t *testing.T) {
 	r := &CrawlResult{
 		Repos: []RepoData{
-			{ReviewComments: make([]ReviewComment, 10)},
-			{ReviewComments: make([]ReviewComment, 2)},
+			{Reviews: make([]ReviewData, 2), ReviewComments: make([]ReviewComment, 10)},
+			{Reviews: make([]ReviewData, 1), ReviewComments: make([]ReviewComment, 2)},
 		},
 	}
-	if got := r.TotalReviews(); got != 12 {
-		t.Errorf("TotalReviews() = %d, want 12", got)
+	if got := r.TotalReviews(); got != 15 {
+		t.Errorf("TotalReviews() = %d, want 15", got)
 	}
 }
 
@@ -87,6 +87,24 @@ func TestCrawlResult_TotalExternalPRs(t *testing.T) {
 	}
 }
 
+func TestCrawlResult_TotalDiscussions(t *testing.T) {
+	r := &CrawlResult{
+		Discussions: make([]DiscussionData, 7),
+	}
+	if got := r.TotalDiscussions(); got != 7 {
+		t.Errorf("TotalDiscussions() = %d, want 7", got)
+	}
+}
+
+func TestCrawlResult_TotalProjects(t *testing.T) {
+	r := &CrawlResult{
+		Projects: make([]ProjectData, 3),
+	}
+	if got := r.TotalProjects(); got != 3 {
+		t.Errorf("TotalProjects() = %d, want 3", got)
+	}
+}
+
 func TestCrawlResult_Zeros(t *testing.T) {
 	r := &CrawlResult{}
 	if got := r.TotalCommits(); got != 0 {
@@ -109,5 +127,11 @@ func TestCrawlResult_Zeros(t *testing.T) {
 	}
 	if got := r.TotalExternalPRs(); got != 0 {
 		t.Errorf("TotalExternalPRs() = %d, want 0", got)
+	}
+	if got := r.TotalDiscussions(); got != 0 {
+		t.Errorf("TotalDiscussions() = %d, want 0", got)
+	}
+	if got := r.TotalProjects(); got != 0 {
+		t.Errorf("TotalProjects() = %d, want 0", got)
 	}
 }

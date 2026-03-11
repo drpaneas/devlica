@@ -23,11 +23,15 @@ func TestGenerate(t *testing.T) {
 			CodingPhilosophy:      "Values performance over readability.",
 			CodeStyleRules:        "- Use snake_case for variables\n- Keep functions under 20 lines",
 			ReviewPriorities:      "1. Performance\n2. Correctness",
+			ReviewDecisionStyle:   "Requests changes for correctness issues, leaves comments for naming nits.",
+			ReviewNonBlockingNits: "Naming and wording issues are usually non-blocking.",
+			ReviewContext:         "Becomes stricter on hot paths and production config changes.",
 			ReviewVoice:           `Blunt and direct. "This is too slow."`,
 			CommunicationPatterns: "Short sentences. No fluff.",
 			TestingPhilosophy:     "Benchmark everything.",
 			DistinctiveTraits:     "Performance-obsessed.",
 			DeveloperInterests:    "Go, Kubernetes, performance tooling.",
+			ActivityPatterns:      "Steady upstream fixes and benchmark-driven maintenance.",
 			ProjectPatterns:       "CLI tools with MIT license, CI via GitHub Actions.",
 			CollaborationStyle:    "Active upstream contributor, detailed bug reports.",
 		},
@@ -58,8 +62,8 @@ func TestGenerate(t *testing.T) {
 	if !strings.Contains(cs, "snake_case") {
 		t.Error("coding style skill should contain 'snake_case'")
 	}
-	if !strings.Contains(cs, "Project Patterns") {
-		t.Error("coding style skill should contain 'Project Patterns' section")
+	if !strings.Contains(cs, "Automation And Project Patterns") {
+		t.Error("coding style skill should contain 'Automation And Project Patterns' section")
 	}
 
 	rvPath := filepath.Join(dir, "testdev-code-reviewer", "SKILL.md")
@@ -74,6 +78,12 @@ func TestGenerate(t *testing.T) {
 	}
 	if !strings.Contains(rv, "Performance") {
 		t.Error("code reviewer skill should contain 'Performance'")
+	}
+	if !strings.Contains(rv, "Approval Thresholds") {
+		t.Error("code reviewer skill should contain 'Approval Thresholds' section")
+	}
+	if !strings.Contains(rv, "Non-Blocking Nits") {
+		t.Error("code reviewer skill should contain 'Non-Blocking Nits' section")
 	}
 	if !strings.Contains(rv, "Collaboration Style") {
 		t.Error("code reviewer skill should contain 'Collaboration Style' section")
@@ -92,8 +102,11 @@ func TestGenerate(t *testing.T) {
 	if !strings.Contains(dp, "Go, Kubernetes") {
 		t.Error("developer profile skill should contain 'Go, Kubernetes'")
 	}
-	if !strings.Contains(dp, "CLI tools") {
-		t.Error("developer profile skill should contain 'CLI tools'")
+	if !strings.Contains(dp, "Activity Patterns") {
+		t.Error("developer profile skill should contain 'Activity Patterns' section")
+	}
+	if !strings.Contains(dp, "Steady upstream fixes") {
+		t.Error("developer profile skill should contain activity patterns content")
 	}
 }
 

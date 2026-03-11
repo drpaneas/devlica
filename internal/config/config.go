@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/drpaneas/devlica/internal/llm"
 )
@@ -12,15 +14,20 @@ var validUsername = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z
 
 // Config holds all runtime configuration for devlica.
 type Config struct {
-	Username    string
-	GitHubToken string
-	Provider    llm.ProviderName
-	Model       string
-	OllamaHost  string
-	APIKey      string
-	OutputDir   string
-	MaxRepos    int
-	Verbose     bool
+	Username        string
+	GitHubTokens    []string
+	PrivateToken    string
+	Provider        llm.ProviderName
+	Model           string
+	OllamaHost      string
+	APIKey          string
+	UseVertexAI     bool
+	VertexRegion    string
+	VertexProjectID string
+	OutputDir       string
+	MaxRepos        int
+	Exhaustive      bool
+	Verbose         bool
 }
 
 // Validate checks that all required fields are set and consistent.
@@ -31,7 +38,7 @@ func (c *Config) Validate() error {
 	if !validUsername.MatchString(c.Username) {
 		return fmt.Errorf("invalid github username %q", c.Username)
 	}
-	if c.GitHubToken == "" {
+	if len(c.GitHubTokens) == 0 {
 		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
 	}
 	switch c.Provider {
@@ -39,18 +46,34 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported LLM provider %q: must be openai, anthropic, or ollama", c.Provider)
 	}
-	if c.APIKey == "" && c.Provider != llm.ProviderOllama {
+	if c.Provider == llm.ProviderOpenAI && c.APIKey == "" {
 		return fmt.Errorf("%s requires an API key (set %s)", c.Provider, envKeyForProvider(c.Provider))
 	}
-	if c.MaxRepos < 1 {
+	if c.Provider == llm.ProviderAnthropic {
+		if c.UseVertexAI {
+			if c.VertexProjectID == "" {
+				return fmt.Errorf("anthropic Vertex AI mode requires ANTHROPIC_VERTEX_PROJECT_ID")
+			}
+			if c.VertexRegion == "" {
+				return fmt.Errorf("anthropic Vertex AI mode requires CLOUD_ML_REGION")
+			}
+		} else if c.APIKey == "" {
+			return fmt.Errorf("anthropic requires ANTHROPIC_API_KEY or Vertex AI settings (CLAUDE_CODE_USE_VERTEX=1, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION)")
+		}
+	}
+	if !c.Exhaustive && c.MaxRepos < 1 {
 		return fmt.Errorf("--max-repos must be at least 1")
+	}
+	if c.Exhaustive && c.MaxRepos < 0 {
+		return fmt.Errorf("--max-repos must be at least 0 when --exhaustive is enabled")
 	}
 	return nil
 }
 
 // LoadFromEnv populates environment-dependent fields (tokens, keys, hosts).
 func (c *Config) LoadFromEnv() {
-	c.GitHubToken = os.Getenv("GITHUB_TOKEN")
+	c.GitHubTokens = loadGitHubTokens()
+	c.PrivateToken = os.Getenv("GITHUB_PRIVATE_TOKEN")
 	c.OllamaHost = os.Getenv("OLLAMA_HOST")
 	if c.OllamaHost == "" {
 		c.OllamaHost = "http://localhost:11434"
@@ -60,7 +83,31 @@ func (c *Config) LoadFromEnv() {
 		c.APIKey = os.Getenv("OPENAI_API_KEY")
 	case llm.ProviderAnthropic:
 		c.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+		c.VertexProjectID = firstNonEmpty(
+			os.Getenv("ANTHROPIC_VERTEX_PROJECT_ID"),
+			os.Getenv("GCLOUD_PROJECT"),
+			os.Getenv("GOOGLE_CLOUD_PROJECT"),
+		)
+		c.VertexRegion = os.Getenv("CLOUD_ML_REGION")
+		c.UseVertexAI = parseBoolEnv("CLAUDE_CODE_USE_VERTEX")
 	}
+}
+
+// loadGitHubTokens reads GITHUB_TOKEN as the primary token, then scans
+// GITHUB_TOKEN_1, GITHUB_TOKEN_2, ... for additional tokens.
+func loadGitHubTokens() []string {
+	var tokens []string
+	if primary := os.Getenv("GITHUB_TOKEN"); primary != "" {
+		tokens = append(tokens, primary)
+	}
+	for i := 1; ; i++ {
+		tok := os.Getenv("GITHUB_TOKEN_" + strconv.Itoa(i))
+		if tok == "" {
+			break
+		}
+		tokens = append(tokens, tok)
+	}
+	return tokens
 }
 
 // DefaultModel returns the default model name for the given provider.
@@ -86,4 +133,23 @@ func envKeyForProvider(provider llm.ProviderName) string {
 	default:
 		return ""
 	}
+}
+
+func parseBoolEnv(key string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

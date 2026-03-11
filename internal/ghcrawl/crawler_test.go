@@ -278,3 +278,109 @@ func TestOwnerRepoFromURL(t *testing.T) {
 		})
 	}
 }
+
+func TestPullRequestNumberFromURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want int
+	}{
+		{
+			name: "api pull url",
+			url:  "https://api.github.com/repos/octocat/hello-world/pulls/123",
+			want: 123,
+		},
+		{
+			name: "html pull url",
+			url:  "https://github.com/octocat/hello-world/pull/77",
+			want: 77,
+		},
+		{
+			name: "invalid url",
+			url:  "://bad",
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pullRequestNumberFromURL(tt.url); got != tt.want {
+				t.Errorf("pullRequestNumberFromURL(%q) = %d, want %d", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadPullRequest(t *testing.T) {
+	t.Run("uses existing map before fetch", func(t *testing.T) {
+		existingPR := &github.PullRequest{Number: github.Ptr(12)}
+		existing := map[int]*github.PullRequest{12: existingPR}
+		loaded := map[int]*github.PullRequest{}
+		calls := 0
+		got := loadPullRequest(12, existing, loaded, func(int) (*github.PullRequest, error) {
+			calls++
+			return nil, nil
+		})
+		if got != existingPR {
+			t.Fatalf("loadPullRequest() returned %v, want existing PR", got)
+		}
+		if calls != 0 {
+			t.Fatalf("fetch called %d times, want 0", calls)
+		}
+	})
+
+	t.Run("fetches and caches missing PR", func(t *testing.T) {
+		existing := map[int]*github.PullRequest{}
+		loaded := map[int]*github.PullRequest{}
+		calls := 0
+		fetched := &github.PullRequest{Number: github.Ptr(99)}
+		fetch := func(int) (*github.PullRequest, error) {
+			calls++
+			return fetched, nil
+		}
+
+		first := loadPullRequest(99, existing, loaded, fetch)
+		second := loadPullRequest(99, existing, loaded, fetch)
+		if first != fetched || second != fetched {
+			t.Fatalf("expected fetched PR to be reused, got first=%v second=%v", first, second)
+		}
+		if calls != 1 {
+			t.Fatalf("fetch called %d times, want 1", calls)
+		}
+	})
+
+	t.Run("invalid PR number returns nil", func(t *testing.T) {
+		got := loadPullRequest(0, map[int]*github.PullRequest{}, map[int]*github.PullRequest{}, func(int) (*github.PullRequest, error) {
+			t.Fatal("fetch should not be called for invalid PR number")
+			return nil, nil
+		})
+		if got != nil {
+			t.Fatalf("loadPullRequest() = %v, want nil", got)
+		}
+	})
+}
+
+func TestPrivateTokenMatchesUsername(t *testing.T) {
+	tests := []struct {
+		name      string
+		tokenUser string
+		requested string
+		want      bool
+	}{
+		{name: "exact match", tokenUser: "alice", requested: "alice", want: true},
+		{name: "case insensitive match", tokenUser: "Alice", requested: "alice", want: true},
+		{name: "whitespace ignored", tokenUser: " alice ", requested: "alice", want: true},
+		{name: "different users", tokenUser: "alice", requested: "bob", want: false},
+		{name: "empty token user", tokenUser: "", requested: "alice", want: false},
+		{name: "empty requested user", tokenUser: "alice", requested: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := privateTokenMatchesUsername(tt.tokenUser, tt.requested); got != tt.want {
+				t.Errorf("privateTokenMatchesUsername(%q, %q) = %v, want %v",
+					tt.tokenUser, tt.requested, got, tt.want)
+			}
+		})
+	}
+}

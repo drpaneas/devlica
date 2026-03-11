@@ -15,18 +15,35 @@ import (
 
 const maxChunkSize = 30000 // bytes per LLM input chunk
 
+const evidenceCompressionPrompt = `You are preparing evidence for a downstream persona analysis.
+Summarize this %s chunk into high-signal bullet points.
+
+Requirements:
+- Preserve concrete examples and exact phrasing when possible.
+- Keep what is distinctive or repeated.
+- Include counts/pattern frequencies if visible in this chunk.
+- Do not add speculation.
+
+Chunk %d/%d:
+%s`
+
 // SynthesisResult holds the structured fields produced by the LLM synthesis step.
 type SynthesisResult struct {
 	CodingPhilosophy      string `json:"coding_philosophy"`
 	CodeStyleRules        string `json:"code_style_rules"`
 	ReviewPriorities      string `json:"review_priorities"`
+	ReviewDecisionStyle   string `json:"review_decision_style"`
+	ReviewNonBlockingNits string `json:"review_non_blocking_nits"`
+	ReviewContext         string `json:"review_context_sensitivity"`
 	ReviewVoice           string `json:"review_voice"`
 	CommunicationPatterns string `json:"communication_patterns"`
 	TestingPhilosophy     string `json:"testing_philosophy"`
 	DistinctiveTraits     string `json:"distinctive_traits"`
 	DeveloperInterests    string `json:"developer_interests"`
+	ActivityPatterns      string `json:"activity_patterns"`
 	ProjectPatterns       string `json:"project_patterns"`
 	CollaborationStyle    string `json:"collaboration_style"`
+	CodeExamples          string `json:"code_examples"`
 }
 
 // Persona holds all analysis results for a developer.
@@ -55,17 +72,20 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 
 	codeSamples := buildCodeSamplesText(data)
 	commitDiffs := buildCommitDiffsText(data)
-	reviewComments := buildReviewCommentsText(data)
+	reviewActivity := buildReviewDataText(data)
 	prDescriptions := buildPRDescriptionsText(data)
 	issueComments := buildIssueCommentsText(data)
 	authoredIssues := buildAuthoredIssuesText(data)
 	releaseNotes := buildReleasesText(data)
+	discussionsText := buildDiscussionsText(data)
 	profileText := buildProfileText(data)
 	starredText := buildStarredReposText(data)
 	gistsText := buildGistsText(data)
 	orgsText := buildOrgsText(data)
 	externalPRsText := buildExternalPRsText(data)
 	eventsText := buildEventsText(data)
+	projectsText := buildProjectsText(data)
+	wikiText := buildWikiPagesText(data)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -75,8 +95,16 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 			persona.CodeStyle = "Insufficient data for code style analysis."
 			return nil
 		}
+		codeSamplesPrepared, err := a.compressToFit(gCtx, "code samples", codeSamples)
+		if err != nil {
+			return fmt.Errorf("compressing code samples: %w", err)
+		}
+		commitDiffsPrepared, err := a.compressToFit(gCtx, "commit diffs", commitDiffs)
+		if err != nil {
+			return fmt.Errorf("compressing commit diffs: %w", err)
+		}
 		slog.Info("analyzing code style")
-		prompt := fmt.Sprintf(codeStylePrompt, username, truncateChunk(codeSamples), truncateChunk(commitDiffs))
+		prompt := fmt.Sprintf(codeStylePrompt, username, codeSamplesPrepared, commitDiffsPrepared)
 		result, err := a.provider.Complete(gCtx, systemPrompt, prompt, nil)
 		if err != nil {
 			return fmt.Errorf("code style analysis: %w", err)
@@ -86,13 +114,17 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 	})
 
 	g.Go(func() error {
-		if reviewComments == "" {
+		if reviewActivity == "" {
 			slog.Warn("no review comments found, skipping review style analysis")
 			persona.ReviewStyle = "Insufficient data for review style analysis."
 			return nil
 		}
+		reviewPrepared, err := a.compressToFit(gCtx, "review activity", reviewActivity)
+		if err != nil {
+			return fmt.Errorf("compressing review activity: %w", err)
+		}
 		slog.Info("analyzing review style")
-		prompt := fmt.Sprintf(reviewStylePrompt, username, truncateChunk(reviewComments))
+		prompt := fmt.Sprintf(reviewStylePrompt, username, reviewPrepared)
 		result, err := a.provider.Complete(gCtx, systemPrompt, prompt, nil)
 		if err != nil {
 			return fmt.Errorf("review style analysis: %w", err)
@@ -102,17 +134,38 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 	})
 
 	g.Go(func() error {
-		if prDescriptions == "" && issueComments == "" && authoredIssues == "" && releaseNotes == "" {
+		if prDescriptions == "" && issueComments == "" && authoredIssues == "" && releaseNotes == "" && discussionsText == "" {
 			slog.Warn("no communication data found, skipping communication analysis")
 			persona.Communication = "Insufficient data for communication analysis."
 			return nil
 		}
+		prPrepared, err := a.compressToFit(gCtx, "pull request descriptions", prDescriptions)
+		if err != nil {
+			return fmt.Errorf("compressing PR descriptions: %w", err)
+		}
+		issueCommentsPrepared, err := a.compressToFit(gCtx, "issue comments", issueComments)
+		if err != nil {
+			return fmt.Errorf("compressing issue comments: %w", err)
+		}
+		authoredIssuesPrepared, err := a.compressToFit(gCtx, "authored issues", authoredIssues)
+		if err != nil {
+			return fmt.Errorf("compressing authored issues: %w", err)
+		}
+		releasesPrepared, err := a.compressToFit(gCtx, "release notes", releaseNotes)
+		if err != nil {
+			return fmt.Errorf("compressing release notes: %w", err)
+		}
+		discussionsPrepared, err := a.compressToFit(gCtx, "discussions", discussionsText)
+		if err != nil {
+			return fmt.Errorf("compressing discussions: %w", err)
+		}
 		slog.Info("analyzing communication style")
 		prompt := fmt.Sprintf(communicationPrompt, username,
-			truncateChunk(prDescriptions),
-			truncateChunk(issueComments),
-			truncateChunk(authoredIssues),
-			truncateChunk(releaseNotes),
+			prPrepared,
+			issueCommentsPrepared,
+			authoredIssuesPrepared,
+			releasesPrepared,
+			discussionsPrepared,
 		)
 		result, err := a.provider.Complete(gCtx, systemPrompt, prompt, nil)
 		if err != nil {
@@ -128,14 +181,48 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 			persona.DeveloperIdentity = "Insufficient data for developer identity analysis."
 			return nil
 		}
+		profilePrepared, err := a.compressToFit(gCtx, "profile", profileText)
+		if err != nil {
+			return fmt.Errorf("compressing profile: %w", err)
+		}
+		starredPrepared, err := a.compressToFit(gCtx, "starred repositories", starredText)
+		if err != nil {
+			return fmt.Errorf("compressing starred repositories: %w", err)
+		}
+		gistsPrepared, err := a.compressToFit(gCtx, "gists", gistsText)
+		if err != nil {
+			return fmt.Errorf("compressing gists: %w", err)
+		}
+		orgsPrepared, err := a.compressToFit(gCtx, "organizations", orgsText)
+		if err != nil {
+			return fmt.Errorf("compressing organizations: %w", err)
+		}
+		externalPRsPrepared, err := a.compressToFit(gCtx, "external pull requests", externalPRsText)
+		if err != nil {
+			return fmt.Errorf("compressing external pull requests: %w", err)
+		}
+		eventsPrepared, err := a.compressToFit(gCtx, "recent activity events", eventsText)
+		if err != nil {
+			return fmt.Errorf("compressing activity events: %w", err)
+		}
+		projectsPrepared, err := a.compressToFit(gCtx, "projects", projectsText)
+		if err != nil {
+			return fmt.Errorf("compressing projects: %w", err)
+		}
+		wikiPrepared, err := a.compressToFit(gCtx, "wiki pages", wikiText)
+		if err != nil {
+			return fmt.Errorf("compressing wiki pages: %w", err)
+		}
 		slog.Info("analyzing developer identity")
 		prompt := fmt.Sprintf(developerIdentityPrompt, username,
-			truncateChunk(profileText),
-			truncateChunk(starredText),
-			truncateChunk(gistsText),
-			truncateChunk(orgsText),
-			truncateChunk(externalPRsText),
-			truncateChunk(eventsText),
+			profilePrepared,
+			starredPrepared,
+			gistsPrepared,
+			orgsPrepared,
+			externalPRsPrepared,
+			eventsPrepared,
+			projectsPrepared,
+			wikiPrepared,
 		)
 		result, err := a.provider.Complete(gCtx, systemPrompt, prompt, nil)
 		if err != nil {
@@ -175,6 +262,9 @@ func (a *Analyzer) Analyze(ctx context.Context, username string, data *ghcrawl.C
 // both raw JSON and JSON wrapped in markdown code fences.
 func ParseSynthesis(raw string) (*SynthesisResult, error) {
 	text := strings.TrimSpace(raw)
+	if text == "" {
+		return nil, fmt.Errorf("invalid JSON from LLM: empty response")
+	}
 
 	// Only strip code fences when the response has non-JSON preamble.
 	// If it already starts with '{', the ``` may be inside a string value
@@ -265,12 +355,55 @@ func buildCommitDiffsText(data *ghcrawl.CrawlResult) string {
 	return interleave(buckets)
 }
 
-func buildReviewCommentsText(data *ghcrawl.CrawlResult) string {
+func buildReviewDataText(data *ghcrawl.CrawlResult) string {
 	var buckets [][]string
 	for _, repo := range data.Repos {
 		var items []string
+		for _, review := range repo.Reviews {
+			stats := ""
+			if review.Additions > 0 || review.Deletions > 0 || review.ChangedFiles > 0 {
+				stats = fmt.Sprintf(" (+%d/-%d, %d files, %d inline comments)",
+					review.Additions, review.Deletions, review.ChangedFiles, review.ReviewCommentCount)
+			}
+			labels := ""
+			if len(review.Labels) > 0 {
+				labels = " [" + strings.Join(review.Labels, ", ") + "]"
+			}
+			body := review.Body
+			if body == "" {
+				body = "(no summary text)"
+			}
+			items = append(items, fmt.Sprintf(
+				"=== %s PR #%d: %s ===\nAuthor: %s\nState: %s%s%s\nSummary:\n%s\n\n",
+				review.Repo,
+				review.PRNumber,
+				review.PRTitle,
+				review.PRAuthor,
+				review.State,
+				stats,
+				labels,
+				body,
+			))
+		}
 		for _, rc := range repo.ReviewComments {
-			items = append(items, fmt.Sprintf("=== %s (file: %s) ===\n%s\n\n", repo.FullName, rc.Path, rc.Body))
+			title := rc.PRTitle
+			if title == "" {
+				title = "(unknown PR title)"
+			}
+			diff := rc.DiffHunk
+			if diff == "" {
+				diff = "(no diff hunk available)"
+			}
+			items = append(items, fmt.Sprintf(
+				"=== %s PR #%d: %s (file: %s) ===\nAuthor: %s\nDiff hunk:\n%s\n\nComment:\n%s\n\n",
+				repo.FullName,
+				rc.PRNumber,
+				title,
+				rc.Path,
+				rc.PRAuthor,
+				diff,
+				rc.Body,
+			))
 		}
 		if len(items) == 0 {
 			for _, cm := range repo.PRComments {
@@ -301,10 +434,24 @@ func buildPRDescriptionsText(data *ghcrawl.CrawlResult) string {
 	// External PRs as their own bucket.
 	var extItems []string
 	for _, pr := range data.ExternalPRs {
-		if pr.Body == "" {
-			continue
+		stats := ""
+		if pr.Additions > 0 || pr.Deletions > 0 || pr.ChangedFiles > 0 {
+			stats = fmt.Sprintf(" (+%d/-%d, %d files)", pr.Additions, pr.Deletions, pr.ChangedFiles)
 		}
-		extItems = append(extItems, fmt.Sprintf("=== %s #%d: %s ===\n%s\n\n", pr.Repo, pr.Number, pr.Title, pr.Body))
+		body := pr.Body
+		if body == "" {
+			body = "(no description)"
+		}
+		extItems = append(extItems, fmt.Sprintf(
+			"=== %s #%d: %s [%s]%s ===\nAuthor: %s\n%s\n\n",
+			pr.Repo,
+			pr.Number,
+			pr.Title,
+			pr.State,
+			stats,
+			pr.Author,
+			body,
+		))
 	}
 	if len(extItems) > 0 {
 		buckets = append(buckets, extItems)
@@ -496,6 +643,9 @@ func buildGistsText(data *ghcrawl.CrawlResult) string {
 			} else {
 				fileNames = append(fileNames, f.Name)
 			}
+			if f.Content != "" {
+				fmt.Fprintf(&b, "  snippet %s:\n%s\n", f.Name, textutil.Truncate(f.Content, 400, "\n..."))
+			}
 		}
 		fmt.Fprintf(&b, "- [%s] %s: %s | files: %s\n",
 			visibility, g.CreatedAt.Format("2006-01-02"), g.Description, strings.Join(fileNames, ", "))
@@ -549,6 +699,117 @@ func buildEventsText(data *ghcrawl.CrawlResult) string {
 	return b.String()
 }
 
+func buildDiscussionsText(data *ghcrawl.CrawlResult) string {
+	if len(data.Discussions) == 0 {
+		return ""
+	}
+	var buckets [][]string
+	repoItems := make(map[string][]string)
+	for _, d := range data.Discussions {
+		var b strings.Builder
+		fmt.Fprintf(&b, "=== %s #%d: %s [%s] ===\nThread author: %s\n",
+			d.Repo, d.Number, d.Title, d.Category, d.Author)
+		if d.Body != "" {
+			fmt.Fprintf(&b, "%s\n", d.Body)
+		}
+		for _, cm := range d.Comments {
+			if cm.Author != "" {
+				fmt.Fprintf(&b, "  Comment by %s: %s\n", cm.Author, cm.Body)
+				continue
+			}
+			fmt.Fprintf(&b, "  Comment: %s\n", cm.Body)
+		}
+		b.WriteByte('\n')
+		repoItems[d.Repo] = append(repoItems[d.Repo], b.String())
+	}
+	for _, items := range repoItems {
+		buckets = append(buckets, items)
+	}
+	return interleave(buckets)
+}
+
+func buildProjectsText(data *ghcrawl.CrawlResult) string {
+	if len(data.Projects) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range data.Projects {
+		visibility := "public"
+		if !p.Public {
+			visibility = "private"
+		}
+		fmt.Fprintf(&b, "- [%s] %s (%d items): %s\n",
+			visibility, p.Title, p.ItemCount, p.Body)
+	}
+	return b.String()
+}
+
+func buildWikiPagesText(data *ghcrawl.CrawlResult) string {
+	var buckets [][]string
+	for _, repo := range data.Repos {
+		var items []string
+		for _, wp := range repo.WikiPages {
+			items = append(items, fmt.Sprintf("=== %s - %s ===\n%s\n\n",
+				wp.Repo, wp.Title, textutil.Truncate(wp.Content, 2000, "\n... (truncated)")))
+		}
+		if len(items) > 0 {
+			buckets = append(buckets, items)
+		}
+	}
+	return interleave(buckets)
+}
+
 func truncateChunk(s string) string {
 	return textutil.Truncate(s, maxChunkSize, "\n... (data truncated to fit context window)")
+}
+
+func (a *Analyzer) compressToFit(ctx context.Context, label, input string) (string, error) {
+	if input == "" || len(input) <= maxChunkSize {
+		return input, nil
+	}
+	current := input
+	for pass := 0; pass < 4; pass++ {
+		if len(current) <= maxChunkSize {
+			return current, nil
+		}
+		chunks := splitChunks(current, maxChunkSize)
+		summaries := make([]string, 0, len(chunks))
+		for i, chunk := range chunks {
+			prompt := fmt.Sprintf(evidenceCompressionPrompt, label, i+1, len(chunks), chunk)
+			out, err := a.provider.Complete(ctx, systemPrompt, prompt, nil)
+			if err != nil {
+				return "", err
+			}
+			summaries = append(summaries, out)
+		}
+		current = strings.Join(summaries, "\n\n")
+		label = label + " summary"
+	}
+	return truncateChunk(current), nil
+}
+
+func splitChunks(s string, max int) []string {
+	if s == "" || max <= 0 {
+		return nil
+	}
+	if len(s) <= max {
+		return []string{s}
+	}
+	var chunks []string
+	remaining := s
+	for len(remaining) > 0 {
+		if len(remaining) <= max {
+			chunks = append(chunks, remaining)
+			break
+		}
+		cut := max
+		if idx := strings.LastIndex(remaining[:max], "\n\n"); idx > max/2 {
+			cut = idx
+		} else if idx := strings.LastIndexByte(remaining[:max], '\n'); idx > max/2 {
+			cut = idx
+		}
+		chunks = append(chunks, remaining[:cut])
+		remaining = remaining[cut:]
+	}
+	return chunks
 }

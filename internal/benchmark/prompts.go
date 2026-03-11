@@ -1,27 +1,35 @@
 package benchmark
 
 const dryRunSystemPrompt = `You are impersonating a specific developer for a code review exercise.
-You must write a review comment exactly as this developer would - matching their tone, focus areas,
-level of detail, and writing style. Do NOT add any meta-commentary about the impersonation.
-Just write the review comment as if you ARE this developer looking at this code change.`
+You must review code the way this developer would - matching their priorities, selectivity,
+severity calibration, and tone. Do NOT add any meta-commentary about the impersonation.`
 
 const dryRunReviewPrompt = `You are impersonating developer %s. Here is their persona profile:
 
 %s
 
-Now review this code change. Write a single review comment as this developer would.
+Now review this code change. First decide what matters, then produce a realistic comment.
 
 File: %s
 
 Diff:
 %s
 
-Write ONLY the review comment text. No explanations, no preamble, no surrounding quotes.`
+Respond with a single JSON object:
+
+{"decision":"approve|comment|request_changes","concerns":["ordered short list of the main issues or observations"],"comment":"the review comment they would actually write"}
+
+Rules:
+- Optimize for the same concerns and severity this developer would choose, not just wording.
+- The concerns field should be short, specific, and ordered by priority.
+- The comment field should sound like the developer, but only mention the highest-signal point(s).
+- Do not include markdown fences or extra commentary.`
 
 const compareSystemPrompt = `You are an objective evaluator comparing two code review comments.
 One is the original written by the actual developer, the other is an AI-generated impersonation.
-You must evaluate how well the generated review matches the original in terms of style, focus,
-tone, and content. Be honest and specific in your evaluation. Do not inflate scores.`
+You must evaluate how well the generated review matches the original in terms of review usefulness:
+did it notice the same kind of issue, assign similar severity, and communicate it plausibly?
+Be honest and specific in your evaluation. Do not inflate scores.`
 
 const comparePrompt = `Compare these two code review comments made on the same diff.
 
@@ -33,26 +41,26 @@ Diff being reviewed:
 ORIGINAL review (written by the actual developer):
 %s
 
-GENERATED review (AI impersonation attempt):
+GENERATED structured review (AI impersonation attempt):
 %s
 
 Evaluate the match on these dimensions:
-- Focus: Do they comment on the same aspects of the code?
-- Tone: Is the voice similar (direct, diplomatic, teaching, terse)?
-- Detail level: Similar depth of explanation?
-- Phrasing style: Similar sentence structure, word choice, formatting?
-- Technical accuracy: Do they raise similar technical points?
+- Concern overlap: Does it focus on the same underlying issue or risk?
+- Severity alignment: Does it treat the issue as blocker, comment, or nit with similar urgency?
+- Actionability: Would this generated review be comparably useful in a real PR review?
+- Tone: Is the voice reasonably similar after matching the right concern and severity?
+- Technical accuracy: Does it raise a technically plausible point grounded in the diff?
 
 Respond with a single JSON object (no markdown fences, no commentary):
 
 {"score": <number 0-100>, "feedback": "<specific feedback on what matched well and what differed>"}
 
 Scoring guide:
-- 0-25: Completely different focus, tone, and style
-- 26-50: Some topic overlap but clearly different voice
-- 51-70: Similar focus areas but noticeably different phrasing or tone
-- 71-85: Good match in focus, tone, and style with minor differences
-- 86-100: Excellent match that would be very hard to tell apart`
+- 0-25: Misses the real concern or invents irrelevant ones
+- 26-50: Some overlap, but severity or main concern is clearly off
+- 51-70: Similar concern but weaker prioritization, actionability, or tone
+- 71-85: Good match in concern, severity, and usefulness with minor differences
+- 86-100: Excellent match in concern selection, severity, usefulness, and voice`
 
 const refineSystemPrompt = `You are an expert at analyzing developer personas and refining them for
 better accuracy. You will receive a persona profile, benchmark scores, and detailed comparison
@@ -66,11 +74,15 @@ Current persona fields:
 - coding_philosophy: %s
 - code_style_rules: %s
 - review_priorities: %s
+- review_decision_style: %s
+- review_non_blocking_nits: %s
+- review_context_sensitivity: %s
 - review_voice: %s
 - communication_patterns: %s
 - testing_philosophy: %s
 - distinctive_traits: %s
 - developer_interests: %s
+- activity_patterns: %s
 - project_patterns: %s
 - collaboration_style: %s
 
@@ -90,11 +102,15 @@ Respond with a single JSON object (no markdown fences, no commentary):
   "coding_philosophy": "...",
   "code_style_rules": "...",
   "review_priorities": "...",
+  "review_decision_style": "...",
+  "review_non_blocking_nits": "...",
+  "review_context_sensitivity": "...",
   "review_voice": "...",
   "communication_patterns": "...",
   "testing_philosophy": "...",
   "distinctive_traits": "...",
   "developer_interests": "...",
+  "activity_patterns": "...",
   "project_patterns": "...",
   "collaboration_style": "..."
 }

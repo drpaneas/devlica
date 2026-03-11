@@ -13,6 +13,8 @@ type CrawlResult struct {
 	AuthoredIssues []IssueData
 	ExternalPRs    []PullRequestData
 	Events         []EventData
+	Discussions    []DiscussionData
+	Projects       []ProjectData
 }
 
 // TotalCommits returns the sum of commits across all repos.
@@ -24,13 +26,14 @@ func (r *CrawlResult) TotalCommits() int {
 	return n
 }
 
-// TotalReviews returns the sum of review comments across all repos.
-// It includes PR conversation comments as a fallback when no line-level
-// review comments exist for a repo.
+// TotalReviews returns the sum of review artifacts across all repos.
+// It counts review summaries, line comments, and falls back to PR conversation
+// comments when no richer review data exists for a repo.
 func (r *CrawlResult) TotalReviews() int {
 	n := 0
 	for _, repo := range r.Repos {
-		if len(repo.ReviewComments) > 0 {
+		if len(repo.Reviews) > 0 || len(repo.ReviewComments) > 0 {
+			n += len(repo.Reviews)
 			n += len(repo.ReviewComments)
 		} else {
 			n += len(repo.PRComments)
@@ -39,9 +42,9 @@ func (r *CrawlResult) TotalReviews() int {
 	return n
 }
 
-func (r *CrawlResult) TotalIssues() int    { return len(r.AuthoredIssues) }
-func (r *CrawlResult) TotalStarred() int   { return len(r.StarredRepos) }
-func (r *CrawlResult) TotalGists() int     { return len(r.Gists) }
+func (r *CrawlResult) TotalIssues() int  { return len(r.AuthoredIssues) }
+func (r *CrawlResult) TotalStarred() int { return len(r.StarredRepos) }
+func (r *CrawlResult) TotalGists() int   { return len(r.Gists) }
 func (r *CrawlResult) TotalReleases() int {
 	n := 0
 	for _, repo := range r.Repos {
@@ -50,6 +53,8 @@ func (r *CrawlResult) TotalReleases() int {
 	return n
 }
 func (r *CrawlResult) TotalExternalPRs() int { return len(r.ExternalPRs) }
+func (r *CrawlResult) TotalDiscussions() int { return len(r.Discussions) }
+func (r *CrawlResult) TotalProjects() int    { return len(r.Projects) }
 
 // UserProfile holds GitHub profile information.
 type UserProfile struct {
@@ -89,10 +94,12 @@ type RepoData struct {
 	UpdatedAt      time.Time
 	Commits        []CommitData
 	PRs            []PullRequestData
+	Reviews        []ReviewData
 	ReviewComments []ReviewComment
 	PRComments     []Comment
 	CodeSamples    []CodeSample
 	Releases       []ReleaseData
+	WikiPages      []WikiPage
 }
 
 // CommitData holds a commit's metadata, optional diff patch, and change stats.
@@ -110,8 +117,10 @@ type CommitData struct {
 type PullRequestData struct {
 	Repo           string
 	Number         int
+	URL            string
 	Title          string
 	Body           string
+	Author         string
 	State          string
 	Labels         []string
 	Date           time.Time
@@ -123,21 +132,44 @@ type PullRequestData struct {
 	ReviewDecision string
 }
 
+// ReviewData holds metadata for a submitted PR review.
+type ReviewData struct {
+	Repo               string
+	PRNumber           int
+	PRTitle            string
+	PRAuthor           string
+	Body               string
+	State              string
+	SubmittedAt        time.Time
+	CommitID           string
+	URL                string
+	Labels             []string
+	Additions          int
+	Deletions          int
+	ChangedFiles       int
+	ReviewCommentCount int
+}
+
 // ReviewComment holds a single PR review comment.
 type ReviewComment struct {
 	Repo     string
+	PRNumber int
+	PRTitle  string
+	PRAuthor string
 	Body     string
 	Path     string
 	DiffHunk string
+	URL      string
 	Date     time.Time
 }
 
 // Comment holds an issue or PR conversation comment.
 type Comment struct {
-	Repo string
-	Body string
-	URL  string
-	Date time.Time
+	Repo   string
+	Author string
+	Body   string
+	URL    string
+	Date   time.Time
 }
 
 // CodeSample holds a source file's path and content.
@@ -170,6 +202,7 @@ type GistData struct {
 type GistFile struct {
 	Name     string
 	Language string
+	Content  string
 }
 
 // IssueData holds metadata for an issue authored by the user.
@@ -198,4 +231,34 @@ type ReleaseData struct {
 	Name      string
 	Body      string
 	CreatedAt time.Time
+}
+
+// DiscussionData holds metadata for a GitHub discussion.
+type DiscussionData struct {
+	Repo      string
+	Number    int
+	Title     string
+	Body      string
+	Category  string
+	Author    string
+	URL       string
+	CreatedAt time.Time
+	Comments  []Comment
+}
+
+// ProjectData holds metadata for a GitHub Projects v2 project.
+type ProjectData struct {
+	Title     string
+	Body      string
+	URL       string
+	Public    bool
+	CreatedAt time.Time
+	ItemCount int
+}
+
+// WikiPage holds the title and content of a repository wiki page.
+type WikiPage struct {
+	Repo    string
+	Title   string
+	Content string
 }

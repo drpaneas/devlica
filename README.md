@@ -1,104 +1,143 @@
 # devlica
 
-Clone a developer's persona from their GitHub activity into
-Cursor AI skills.
+Clone a developer persona from GitHub activity into Cursor skills.
 
-Devlica crawls a programmer's entire GitHub history - repos,
-commits, pull requests, reviews, issues, starred repos, gists,
-and more - then feeds the data to a large language model which
-synthesizes the patterns into a structured persona. The persona
-is written out as Cursor skill files that guide an AI assistant
-to code, review, and communicate the way you do.
+`devlica` crawls GitHub data (repos, commits, pull requests, reviews, issues, gists, stars, and more), analyzes patterns with an LLM, benchmarks persona quality against held-out review comments, and writes Cursor skill files to disk.
 
-## Building
+## Current Status
 
-    go build -o devlica .
+- LLM providers: `anthropic` (default), `openai`, `ollama`
+- Anthropic auth modes:
+  - API key (`ANTHROPIC_API_KEY`)
+  - Google Vertex AI (Claude Code style env vars + ADC)
+- Multi-token GitHub crawling supported via `GITHUB_TOKEN`, `GITHUB_TOKEN_1`, `GITHUB_TOKEN_2`, ...
+- Optional private token supported via `GITHUB_PRIVATE_TOKEN`
+- Exhaustive crawling mode available via `--exhaustive` (subject to GitHub upstream limits)
+
+## Build
+
+```bash
+go build -o devlica .
+```
 
 ## Usage
 
-    devlica [flags] <username>
+```bash
+./devlica [flags] <github-username>
+```
 
-The single required argument is a GitHub username.
+## Required Environment
 
-Devlica needs two things from its environment: a GitHub token
-to read repository data, and an API key for whichever language
-model you choose. Set them as environment variables:
+### GitHub tokens
 
-    export GITHUB_TOKEN=ghp_...
-    export ANTHROPIC_API_KEY=sk-ant-...
+At least one GitHub token is required:
 
-Then run it:
+```bash
+export GITHUB_TOKEN=ghp_...
+```
 
-    ./devlica drpaneas
+Optional extra tokens for pool rotation:
 
-The program crawls the user's activity, analyzes the data in
-parallel, and writes skill files to `./output`.
+```bash
+export GITHUB_TOKEN_1=ghp_...
+export GITHUB_TOKEN_2=ghp_...
+```
+
+Optional private token:
+
+```bash
+export GITHUB_PRIVATE_TOKEN=ghp_...
+```
+
+### Anthropic (default provider) with API key
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+./devlica drpaneas
+```
+
+### Anthropic with Vertex AI (Claude Code style)
+
+`devlica` supports the same Vertex AI style variables used by Claude Code.
+
+```bash
+# Enable ADC credentials first (outside devlica)
+gcloud auth application-default login
+gcloud auth application-default set-quota-project cloudability-it-gemini
+
+# Claude Code style Vertex env
+export CLAUDE_CODE_USE_VERTEX=1
+export CLOUD_ML_REGION=us-east5
+export ANTHROPIC_VERTEX_PROJECT_ID=<your-project-id>
+
+# Run devlica (provider defaults to anthropic)
+./devlica drpaneas
+```
+
+Notes:
+
+- Vertex mode is enabled only when `CLAUDE_CODE_USE_VERTEX=1`.
+- In Vertex mode, both `CLOUD_ML_REGION` and project ID are required.
+- Project ID is read from `ANTHROPIC_VERTEX_PROJECT_ID` first, then falls back to `GCLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT`.
+- If Vertex mode is not enabled, `ANTHROPIC_API_KEY` is required for Anthropic.
+
+### OpenAI
+
+```bash
+export OPENAI_API_KEY=sk-...
+./devlica -provider openai drpaneas
+```
+
+### Ollama
+
+```bash
+# Optional override, defaults to http://localhost:11434
+export OLLAMA_HOST=http://localhost:11434
+./devlica -provider ollama drpaneas
+```
 
 ## Flags
 
-    -provider string    LLM provider: openai, anthropic, ollama (default "anthropic")
-    -model string       LLM model name (default depends on provider)
-    -output string      output directory (default "./output")
-    -max-repos int      maximum repositories to deep-crawl (default 10)
-    -verbose            print debug messages
+```text
+-provider string    LLM provider: openai, anthropic, ollama (default "anthropic")
+-model string       LLM model (default: per-provider)
+-output string      Output directory for generated skills (default "./output")
+-max-repos int      Maximum repositories to deep-crawl (default 10)
+-exhaustive         Crawl exhaustive public GitHub activity data (disables sampling caps)
+-verbose            Enable verbose logging
+```
 
-## Providers
+## Default Models
 
-Three providers are supported. OpenAI and Anthropic require
-API keys; Ollama runs locally and needs none.
+- `anthropic`: `claude-opus-4-6`
+- `openai`: `gpt-4o`
+- `ollama`: `llama3`
 
-    # Anthropic (default)
-    export ANTHROPIC_API_KEY=sk-ant-...
-    ./devlica drpaneas
+Use `-model` to override.
 
-    # OpenAI
-    export OPENAI_API_KEY=sk-...
-    ./devlica -provider openai drpaneas
+## How It Works
 
-    # Ollama (must be running on localhost:11434, or set OLLAMA_HOST)
-    ./devlica -provider ollama drpaneas
+1. Crawl GitHub activity and code/review context.
+2. Analyze style and behavior in parallel LLM passes.
+3. Benchmark persona quality against held-out review comments, and refine when needed.
+4. Generate Cursor skill files in the output directory.
 
-Default models are claude-opus-4-6, gpt-4o, and llama3,
-respectively. Use `-model` to override.
+## GitHub Upstream Limits
 
-## How it works
+Even in `--exhaustive` mode, some data sources are capped by GitHub:
 
-The program proceeds in four stages.
+- Public events are limited to recent activity windows.
+- Search API queries are capped per query.
 
-**Crawl.** It collects the user's full GitHub footprint:
-all repositories (not just owned - collaborator and member
-repos too), commits with patches sampled across the full
-history of each repo, pull requests with diff stats, review
-comments with diff context, issue comments, authored issues,
-starred repos, gists, organization memberships, releases,
-and recent activity events. Repos for deep-crawling are
-selected for diversity across languages and time periods
-rather than just recency.
-
-**Analyze.** The crawled data is sent to the language model in
-four parallel requests: coding style (from code samples and
-commit diffs), review style (from review comments), communication
-patterns (from PR descriptions, issue reports, and release notes),
-and developer identity (from profile, starred repos, gists,
-organizations, and external contributions). A fifth request
-synthesizes these into a structured persona.
-
-**Benchmark.** If enough review comments with diff context were
-found, some are held out for validation. The program generates
-simulated reviews from the persona and scores them against the
-originals. If the score is low, it refines the persona and
-tries again, up to five iterations.
-
-**Generate.** The persona is rendered into three Cursor skill
-files using Go templates: coding style, code review, and
-developer profile.
+`devlica` logs warnings when collected counts look truncated by those limits.
 
 ## Output
 
-The generated files are plain Markdown with YAML front matter,
-suitable for use as Cursor AI skills:
+Generated skills:
 
-    output/
-      <username>-coding-style/SKILL.md
-      <username>-code-reviewer/SKILL.md
-      <username>-developer-profile/SKILL.md
+```text
+output/
+  <username>-coding-style/SKILL.md
+  <username>-code-reviewer/SKILL.md
+  <username>-developer-profile/SKILL.md
+```
